@@ -309,6 +309,11 @@ resource "aws_iam_role_policy" "bedrock_agent" {
         Effect   = "Allow"
         Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
         Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["bedrock:Retrieve"]
+        Resource = "*"
       }
     ]
   })
@@ -501,10 +506,12 @@ resource "null_resource" "opensearch_role_mapping" {
       host        = aws_instance.otel_collector.public_ip
       user        = "ubuntu"
       private_key = file(var.ec2_key_path)
-      timeout     = "5m"
+      timeout     = "10m"
     }
 
     inline = [
+      "echo 'Waiting for EC2 to be fully ready...'",
+      "cloud-init status --wait || true",
       "echo 'Waiting for OpenSearch to be ready...'",
       "sleep 120",
       "curl -sk -u '${var.opensearch_master_user}:${var.opensearch_master_password}' -X PUT 'https://${aws_opensearch_domain.main.endpoint}/_plugins/_security/api/rolesmapping/all_access' -H 'Content-Type: application/json' -d '{\"backend_roles\":[\"${aws_iam_role.osis_pipeline.arn}\"],\"users\":[\"${var.opensearch_master_user}\"]}' || true",

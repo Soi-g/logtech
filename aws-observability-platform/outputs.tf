@@ -63,6 +63,11 @@ output "s3_runbooks_bucket" {
   value       = aws_s3_bucket.runbooks.id
 }
 
+output "aoss_runbooks_endpoint" {
+  description = "OpenSearch Serverless 런북 컬렉션 엔드포인트"
+  value       = aws_opensearchserverless_collection.runbooks.collection_endpoint
+}
+
 output "bedrock_agent_role_arn" {
   description = "Bedrock Agent IAM Role ARN"
   value       = aws_iam_role.bedrock_agent.arn
@@ -138,4 +143,9 @@ output "next_steps" {
 
   ========================================
   EOT
+}
+
+output "sns_topic_arn" {
+  description = "SNS 알람 토픽 ARN"
+  value       = aws_sns_topic.alerts.arn
 }

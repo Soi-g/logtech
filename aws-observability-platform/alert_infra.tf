@@ -157,7 +157,7 @@ resource "aws_lambda_layer_version" "agent_deps" {
 resource "aws_lambda_function" "agent" {
   function_name    = "${var.project_name}-observability-agent"
   role             = aws_iam_role.lambda_agent.arn
-  handler          = "lambda_handler.handler"
+  handler          = "bedrock_agent_runtime_handler.lambda_handler"
   runtime          = "python3.12"
   s3_bucket        = aws_s3_bucket.runbooks.id
   s3_key           = aws_s3_object.lambda_agent.key
@@ -173,19 +173,21 @@ resource "aws_lambda_function" "agent" {
 
   environment {
     variables = {
-      AMP_ENDPOINT        = aws_prometheus_workspace.main.prometheus_endpoint
-      OPENSEARCH_ENDPOINT = aws_opensearch_domain.main.endpoint
-      OPENSEARCH_USER     = var.opensearch_master_user
-      OPENSEARCH_PASSWORD = var.opensearch_master_password
-      # SLACK_WEBHOOK_URL   = var.slack_webhook_url                                   # (슬랙 연동 시 사용했었음)
-      SLACK_BOT_TOKEN = var.slack_bot_token # (슬랙 연동 시 사용) 실제 토큰으로 변경
-      SLACK_CHANNEL   = var.slack_channel   # 채널 ID로 변경
-      AWS_REGION_NAME = var.aws_region
-      AOSS_ENDPOINT   = aws_opensearchserverless_collection.runbooks.collection_endpoint # 런북용 OpenSearch Serverless 엔드포인트
+      BEDROCK_AGENT_ID                = aws_bedrockagent_agent.observability.id
+      BEDROCK_AGENT_ALIAS_ID          = aws_bedrockagent_agent_alias.prod.agent_alias_id
+      AOSS_INCIDENT_MEMORY_ENDPOINT   = aws_opensearchserverless_collection.incident_memory.collection_endpoint
+      SLACK_BOT_TOKEN                 = var.slack_bot_token
+      SLACK_CHANNEL                   = var.slack_channel
+      AWS_REGION_NAME                 = var.aws_region
     }
   }
 
   tags = { Name = "${var.project_name}-observability-agent" }
+  
+  depends_on = [
+    aws_bedrockagent_agent.observability,
+    aws_bedrockagent_agent_alias.prod
+  ]
 }
 
 resource "aws_lambda_permission" "sns_trigger" {

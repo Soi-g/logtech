@@ -467,17 +467,19 @@ def get_trace_by_id(trace_id: str) -> str:
 
 
 # ============================================================
-# Agent 정의 (agents.py와 동일한 구조)
+# Agent 정의 (비용 최적화: Haiku 3.5 사용)
 # ============================================================
 
-model = BedrockModel(
-    model_id="apac.anthropic.claude-sonnet-4-20250514-v1:0",
+# 🔵 Haiku 3.5 모델 (비용 효율적)
+# 입력: $0.8/MTok, 출력: $4/MTok (Sonnet 4 대비 75% 저렴)
+haiku_model = BedrockModel(
+    model_id="us.anthropic.claude-3-5-haiku-20241022-v1:0",
     region_name=AWS_REGION,
     streaming=False
 )
 
 metrics_agent = Agent(
-    model=model,
+    model=haiku_model,
     system_prompt="""Metrics 전문 분석가. 반드시 Tool 호출.
 - 핵심 수치만 간결하게 표로 정리
 - 3줄 이내 결론
@@ -488,7 +490,7 @@ metrics_agent = Agent(
 )
 
 logs_agent = Agent(
-    model=model,
+    model=haiku_model,
     system_prompt="""Logs 전문 분석가. 반드시 Tool 호출.
 - 발견된 이슈만 간결하게 요약
 - 이슈 없으면 "정상" 한 줄로 끝
@@ -498,7 +500,7 @@ logs_agent = Agent(
 )
 
 traces_agent = Agent(
-    model=model,
+    model=haiku_model,
     system_prompt="""Traces 전문 분석가. 반드시 Tool 호출.
 - 서비스별 응답시간, 에러율만 표로 정리
 - 느린 요청 있으면 서비스, ms만 명시

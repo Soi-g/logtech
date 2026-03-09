@@ -7,14 +7,16 @@ apt-get install -y wget curl jq docker.io apt-transport-https software-propertie
 systemctl enable docker
 systemctl start docker
 
-wget https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.119.0/otelcol-contrib_0.119.0_linux_amd64.tar.gz -O otelcol-contrib_linux_amd64.tar.gz
-mkdir -p /opt/otelcol
-tar -xzf otelcol-contrib_linux_amd64.tar.gz -C /opt/otelcol
-ln -sf /opt/otelcol/otelcol-contrib /usr/local/bin/otelcol
+# OpenTelemetry Collector 설치
+cd /tmp
+wget https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.115.1/otelcol-contrib_0.115.1_linux_amd64.tar.gz
+tar -xzf otelcol-contrib_0.115.1_linux_amd64.tar.gz
+mv otelcol-contrib /usr/local/bin/
+rm otelcol-contrib_0.115.1_linux_amd64.tar.gz
 
 useradd --system --no-create-home --shell /usr/sbin/nologin otelcol || true
 mkdir -p /etc/otelcol
-chown otelcol:otelcol /etc/otelcol
+chown -R otelcol:otelcol /etc/otelcol
 
 cat > /etc/otelcol/config.yaml <<EOF
 receivers:
@@ -95,7 +97,7 @@ EOF
 chown otelcol:otelcol /etc/otelcol/config.yaml
 chmod 640 /etc/otelcol/config.yaml
 
-cat > /etc/systemd/system/otelcol.service <<EOF
+cat > /etc/systemd/system/otelcol.service <<OTEL_SERVICE
 [Unit]
 Description=OpenTelemetry Collector
 After=network.target
@@ -104,15 +106,13 @@ After=network.target
 Type=simple
 User=otelcol
 Group=otelcol
-ExecStart=/usr/local/bin/otelcol --config=/etc/otelcol/config.yaml
+ExecStart=/usr/local/bin/otelcol-contrib --config=/etc/otelcol/config.yaml
 Restart=on-failure
 RestartSec=5s
-MemoryLimit=800M
-CPUQuota=80%
 
 [Install]
 WantedBy=multi-user.target
-EOF
+OTEL_SERVICE
 
 systemctl daemon-reload
 systemctl enable otelcol
@@ -271,6 +271,6 @@ systemctl start grafana-server
 echo "====================================="
 echo "설치 완료!"
 echo "Envoy  : 4317(gRPC) / 4318(HTTP) - JWT 인증"
-echo "OTelCol: 14317(gRPC) / 14318(HTTP) - 내부 전용"
+echo "OTel   : 14317(gRPC) / 14318(HTTP) - 내부 전용"
 echo "Grafana: 3000"
 echo "====================================="
