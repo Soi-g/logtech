@@ -338,6 +338,7 @@ resource "aws_instance" "otel_collector" {
 
   user_data = templatefile("${path.module}/user_data.sh", {
     amp_remote_write_url       = aws_prometheus_workspace.main.prometheus_endpoint
+    amp_workspace_id           = aws_prometheus_workspace.main.id
     aws_region                 = var.aws_region
     osis_logs_endpoint         = tolist(aws_osis_pipeline.logs.ingest_endpoint_urls)[0]
     osis_traces_endpoint       = tolist(aws_osis_pipeline.traces.ingest_endpoint_urls)[0]

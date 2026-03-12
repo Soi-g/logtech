@@ -219,6 +219,7 @@ _urllib3_logger = logging.getLogger("urllib3.connectionpool")
 
 X_API_KEY = "x-api-key"
 EMPTY_SEQ: tuple[dict, ...] = ()
+_UNSET = object()
 URLLIB3_SUPPORTS_BLOCKSIZE = "key_blocksize" in signature(PoolKey).parameters
 DEFAULT_INSTRUCTIONS = "How are people using my agent? What are they asking about?"
 
@@ -991,6 +992,51 @@ class Client:
         self._multipart_disabled: bool = False
         self._use_daemon_threads = ls_utils.get_env_var("USE_DAEMON") == "true"
 
+        # Set OTEL exporter before starting the tracing thread so the thread sees it
+        # and disables compression in OTEL-only mode (avoids "Run compression is not enabled" warning).
+        if _check_otel_enabled() or otel_enabled:
+            try:
+                (
+                    otel_trace,
+                    set_span_in_context,
+                    get_otlp_tracer_provider,
+                    OTELExporter,
+                ) = _import_otel()
+
+                existing_provider = otel_trace.get_tracer_provider()
+                tracer = existing_provider.get_tracer(__name__)
+                if otel_tracer_provider is None:
+                    # Use existing global provider if available
+                    if not (
+                        isinstance(existing_provider, otel_trace.ProxyTracerProvider)
+                        and hasattr(tracer, "_tracer")
+                        and isinstance(
+                            cast(
+                                otel_trace.ProxyTracer,  # type: ignore[attr-defined, name-defined]
+                                tracer,
+                            )._tracer,
+                            otel_trace.NoOpTracer,
+                        )
+                    ):
+                        otel_tracer_provider = cast(TracerProvider, existing_provider)
+                    else:
+                        otel_tracer_provider = get_otlp_tracer_provider()
+                        otel_trace.set_tracer_provider(otel_tracer_provider)
+
+                self.otel_exporter = OTELExporter(tracer_provider=otel_tracer_provider)
+
+                # Store imports for later use
+                self._otel_trace = otel_trace
+                self._set_span_in_context = set_span_in_context
+
+            except ImportError:
+                warnings.warn(
+                    "LANGSMITH_OTEL_ENABLED is set but OpenTelemetry packages are not installed: Install with `pip install langsmith[otel]"
+                )
+                self.otel_exporter = None
+        else:
+            self.otel_exporter = None
+
         # Initialize auto batching
         if auto_batch_tracing:
             queue_maxsize_str = ls_utils.get_env_var("TRACING_QUEUE_MAX_SIZE")
@@ -1098,49 +1144,6 @@ class Client:
         self._settings: Union[ls_schemas.LangSmithSettings, None] = None
 
         self._manual_cleanup = False
-
-        if _check_otel_enabled() or otel_enabled:
-            try:
-                (
-                    otel_trace,
-                    set_span_in_context,
-                    get_otlp_tracer_provider,
-                    OTELExporter,
-                ) = _import_otel()
-
-                existing_provider = otel_trace.get_tracer_provider()
-                tracer = existing_provider.get_tracer(__name__)
-                if otel_tracer_provider is None:
-                    # Use existing global provider if available
-                    if not (
-                        isinstance(existing_provider, otel_trace.ProxyTracerProvider)
-                        and hasattr(tracer, "_tracer")
-                        and isinstance(
-                            cast(
-                                otel_trace.ProxyTracer,  # type: ignore[attr-defined, name-defined]
-                                tracer,
-                            )._tracer,
-                            otel_trace.NoOpTracer,
-                        )
-                    ):
-                        otel_tracer_provider = cast(TracerProvider, existing_provider)
-                    else:
-                        otel_tracer_provider = get_otlp_tracer_provider()
-                        otel_trace.set_tracer_provider(otel_tracer_provider)
-
-                self.otel_exporter = OTELExporter(tracer_provider=otel_tracer_provider)
-
-                # Store imports for later use
-                self._otel_trace = otel_trace
-                self._set_span_in_context = set_span_in_context
-
-            except ImportError:
-                warnings.warn(
-                    "LANGSMITH_OTEL_ENABLED is set but OpenTelemetry packages are not installed: Install with `pip install langsmith[otel]"
-                )
-                self.otel_exporter = None
-        else:
-            self.otel_exporter = None
 
         self._tracing_error_callback = tracing_error_callback
 
@@ -1978,31 +1981,42 @@ class Client:
         return random.random() < self.tracing_sample_rate
 
     def _filter_for_sampling(
-        self, runs: Iterable[dict], *, patch: bool = False
-    ) -> list[dict]:
+        self,
+        runs: Iterable[Union[dict, ls_schemas.Run, ls_schemas.RunLikeDict]],
+        *,
+        patch: bool = False,
+    ) -> list:
         if self.tracing_sample_rate is None:
             return list(runs)
+
+        def _val(run: Any, key: str, default: Any = _UNSET) -> Any:
+            try:
+                return run[key]
+            except (KeyError, TypeError):
+                if default is _UNSET:
+                    return getattr(run, key)
+                return getattr(run, key, default)
 
         if patch:
             sampled = []
             for run in runs:
-                trace_id = _as_uuid(run["trace_id"])
+                trace_id = _as_uuid(_val(run, "trace_id"))
                 if trace_id not in self._filtered_post_uuids:
                     sampled.append(run)
-                elif run["id"] == trace_id:
+                elif _val(run, "id") == trace_id:
                     self._filtered_post_uuids.remove(trace_id)
             return sampled
         else:
             sampled = []
             for run in runs:
-                trace_id = run.get("trace_id") or run["id"]
+                trace_id = _val(run, "trace_id", None) or _val(run, "id")
 
                 # If we've already made a decision about this trace, follow it
                 if trace_id in self._filtered_post_uuids:
                     continue
 
                 # For new traces, apply sampling
-                if run["id"] == trace_id:
+                if _val(run, "id") == trace_id:
                     if self._should_sample():
                         sampled.append(run)
                     else:
@@ -2510,8 +2524,6 @@ class Client:
         update: Optional[
             Sequence[Union[ls_schemas.Run, ls_schemas.RunLikeDict, dict]]
         ] = None,
-        *,
-        pre_sampled: bool = False,
     ) -> None:
         """Batch ingest/upsert multiple runs in the Langsmith system.
 
@@ -2522,8 +2534,6 @@ class Client:
             update (Optional[Sequence[Union[Run, RunLikeDict]]]):
                 A sequence of `Run` objects or equivalent dictionaries representing
                 runs that have already been created and should be updated / patched.
-            pre_sampled (bool, default=False): Whether the runs have already been subject
-                to sampling, and therefore should not be sampled again.
 
         Raises:
             LangsmithAPIError: If there is an error in the API request.
@@ -2603,13 +2613,15 @@ class Client:
         """
         if not create and not update:
             return
+        # filter out runs that are not sampled
+        create = self._filter_for_sampling(create or EMPTY_SEQ)
+        update = self._filter_for_sampling(update or EMPTY_SEQ, patch=True)
+        if not create and not update:
+            return
         # transform and convert to dicts
-        create_dicts = [
-            self._run_transform(run, copy=False) for run in create or EMPTY_SEQ
-        ]
+        create_dicts = [self._run_transform(run, copy=False) for run in create]
         update_dicts = [
-            self._run_transform(run, update=True, copy=False)
-            for run in update or EMPTY_SEQ
+            self._run_transform(run, update=True, copy=False) for run in update
         ]
         for run in create_dicts:
             if not run.get("trace_id") or not run.get("dotted_order"):
@@ -2621,13 +2633,6 @@ class Client:
                 raise ls_utils.LangSmithUserError(
                     "Batch ingest requires trace_id and dotted_order to be set."
                 )
-        # filter out runs that are not sampled
-        if not pre_sampled:
-            create_dicts = self._filter_for_sampling(create_dicts)
-            update_dicts = self._filter_for_sampling(update_dicts, patch=True)
-
-        if not create_dicts and not update_dicts:
-            return
 
         # Apply process_buffered_run_ops function if provided
         if self._process_buffered_run_ops:
@@ -2790,7 +2795,6 @@ class Client:
             Sequence[Union[ls_schemas.Run, ls_schemas.RunLikeDict, dict]]
         ] = None,
         *,
-        pre_sampled: bool = False,
         dangerously_allow_filesystem: bool = False,
     ) -> None:
         """Batch ingest/upsert multiple runs in the Langsmith system.
@@ -2802,8 +2806,6 @@ class Client:
             update (Optional[Sequence[Union[ls_schemas.Run, RunLikeDict]]]):
                 A sequence of `Run` objects or equivalent dictionaries representing
                 runs that have already been created and should be updated / patched.
-            pre_sampled (bool, default=False): Whether the runs have already been subject
-                to sampling, and therefore should not be sampled again.
 
         Raises:
             LangsmithAPIError: If there is an error in the API request.
@@ -2880,11 +2882,14 @@ class Client:
         """
         if not (create or update):
             return
+        # filter out runs that are not sampled
+        create = self._filter_for_sampling(create or EMPTY_SEQ)
+        update = self._filter_for_sampling(update or EMPTY_SEQ, patch=True)
+        if not create and not update:
+            return
         # transform and convert to dicts
-        create_dicts = [self._run_transform(run) for run in create or EMPTY_SEQ]
-        update_dicts = [
-            self._run_transform(run, update=True) for run in update or EMPTY_SEQ
-        ]
+        create_dicts = [self._run_transform(run) for run in create]
+        update_dicts = [self._run_transform(run, update=True) for run in update]
         # require trace_id and dotted_order
         if create_dicts:
             for run in create_dicts:
@@ -2918,10 +2923,6 @@ class Client:
             else:
                 del run
             update_dicts = standalone_updates
-        # filter out runs that are not sampled
-        if not pre_sampled:
-            create_dicts = self._filter_for_sampling(create_dicts)
-            update_dicts = self._filter_for_sampling(update_dicts, patch=True)
         if not create_dicts and not update_dicts:
             return
         # insert runtime environment

@@ -265,6 +265,45 @@ wget -q -O - https://packages.grafana.com/gpg.key | apt-key add -
 echo "deb https://packages.grafana.com/oss/deb stable main" | tee /etc/apt/sources.list.d/grafana.list
 apt-get update -y
 apt-get install -y grafana
+
+# Grafana 데이터 소스 자동 설정
+mkdir -p /etc/grafana/provisioning/datasources
+cat > /etc/grafana/provisioning/datasources/datasources.yaml <<GRAFANA_DS
+apiVersion: 1
+
+datasources:
+  - name: Prometheus (AMP)
+    type: prometheus
+    access: proxy
+    url: http://localhost:8005/workspaces/${amp_workspace_id}
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 30s
+    editable: true
+
+  - name: OpenSearch
+    type: opensearch
+    access: proxy
+    url: ${opensearch_endpoint}
+    database: "logs-*"
+    basicAuth: true
+    basicAuthUser: ${opensearch_master_user}
+    jsonData:
+      timeField: "@timestamp"
+      esVersion: "2.11.0"
+      logMessageField: message
+      logLevelField: log.level
+      interval: Daily
+      timeInterval: 10s
+      maxConcurrentShardRequests: 5
+    secureJsonData:
+      basicAuthPassword: "${opensearch_master_password}"
+    editable: true
+GRAFANA_DS
+
+chown -R grafana:grafana /etc/grafana/provisioning
+
 systemctl enable grafana-server
 systemctl start grafana-server
 
@@ -273,6 +312,8 @@ echo "설치 완료!"
 echo "Envoy  : 4317(gRPC) / 4318(HTTP) - JWT 인증"
 echo "OTel   : 14317(gRPC) / 14318(HTTP) - 내부 전용"
 echo "Grafana: 3000"
+echo "  - Prometheus (AMP) via SigV4 Proxy"
+echo "  - OpenSearch (로그/트레이스)"
 echo "====================================="
 
 # ============================================================
