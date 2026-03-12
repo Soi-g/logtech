@@ -84,7 +84,7 @@ resource "aws_iam_role_policy" "lambda_agent" {
       {
         Sid      = "AMP"
         Effect   = "Allow"
-        Action   = ["aps:QueryMetrics", "aps:GetSeries", "aps:GetLabels"]
+        Action   = ["aps:QueryMetrics", "aps:GetSeries", "aps:GetLabels", "aps:GetMetricMetadata", "aps:RemoteRead"]
         Resource = "*"
       },
       {
@@ -111,7 +111,9 @@ resource "aws_iam_role_policy" "lambda_agent" {
         Action = [
           "ec2:CreateNetworkInterface",
           "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface"
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
         ]
         Resource = "*"
       }
@@ -173,20 +175,26 @@ resource "aws_lambda_function" "agent" {
 
   environment {
     variables = {
-      BEDROCK_AGENT_ID                = aws_bedrockagent_agent.observability.id
-      BEDROCK_AGENT_ALIAS_ID          = aws_bedrockagent_agent_alias.prod.agent_alias_id
-      AOSS_INCIDENT_MEMORY_ENDPOINT   = aws_opensearchserverless_collection.incident_memory.collection_endpoint
-      SLACK_BOT_TOKEN                 = var.slack_bot_token
-      SLACK_CHANNEL                   = var.slack_channel
-      AWS_REGION_NAME                 = var.aws_region
+      BEDROCK_AGENT_ID              = aws_bedrockagent_agent.observability.id
+      BEDROCK_AGENT_ALIAS_ID        = aws_bedrockagent_agent_alias.prod.agent_alias_id
+      AOSS_INCIDENT_MEMORY_ENDPOINT = aws_opensearchserverless_collection.incident_memory.collection_endpoint
+      AMP_ENDPOINT                  = "${aws_prometheus_workspace.main.prometheus_endpoint}api/v1/"
+      OPENSEARCH_ENDPOINT           = aws_opensearch_domain.main.endpoint
+      OPENSEARCH_USER               = var.opensearch_master_user
+      OPENSEARCH_PASSWORD           = var.opensearch_master_password
+      BEDROCK_KB_ID                 = aws_bedrockagent_knowledge_base.runbooks.id # ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
+      SLACK_BOT_TOKEN               = var.slack_bot_token
+      SLACK_CHANNEL                 = var.slack_channel
+      AWS_REGION_NAME               = var.aws_region
     }
   }
 
   tags = { Name = "${var.project_name}-observability-agent" }
-  
+
   depends_on = [
     aws_bedrockagent_agent.observability,
-    aws_bedrockagent_agent_alias.prod
+    aws_bedrockagent_agent_alias.prod,
+    aws_iam_role_policy.lambda_agent
   ]
 }
 

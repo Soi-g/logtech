@@ -337,16 +337,20 @@ resource "aws_instance" "otel_collector" {
   }
 
   user_data = templatefile("${path.module}/user_data.sh", {
-    amp_remote_write_url = aws_prometheus_workspace.main.prometheus_endpoint
-    aws_region           = var.aws_region
-    osis_logs_endpoint   = tolist(aws_osis_pipeline.logs.ingest_endpoint_urls)[0]
-    osis_traces_endpoint = tolist(aws_osis_pipeline.traces.ingest_endpoint_urls)[0]
-    s3_logs_bucket       = aws_s3_bucket.logs_backup.id
-    s3_traces_bucket     = aws_s3_bucket.traces_backup.id
-    s3_metrics_bucket    = aws_s3_bucket.metrics_backup.id
-    project_name         = var.project_name
-    cognito_user_pool_id = aws_cognito_user_pool.otel_auth.id
-    cognito_client_id    = aws_cognito_user_pool_client.otel_customer.id
+    amp_remote_write_url       = aws_prometheus_workspace.main.prometheus_endpoint
+    aws_region                 = var.aws_region
+    osis_logs_endpoint         = tolist(aws_osis_pipeline.logs.ingest_endpoint_urls)[0]
+    osis_traces_endpoint       = tolist(aws_osis_pipeline.traces.ingest_endpoint_urls)[0]
+    s3_logs_bucket             = aws_s3_bucket.logs_backup.id
+    s3_traces_bucket           = aws_s3_bucket.traces_backup.id
+    s3_metrics_bucket          = aws_s3_bucket.metrics_backup.id
+    project_name               = var.project_name
+    cognito_user_pool_id       = aws_cognito_user_pool.otel_auth.id
+    cognito_client_id          = aws_cognito_user_pool_client.otel_customer.id
+    opensearch_endpoint        = aws_opensearch_domain.main.endpoint
+    opensearch_master_user     = var.opensearch_master_user
+    opensearch_master_password = var.opensearch_master_password
+    osis_role_arn              = aws_iam_role.osis_pipeline.arn
   })
   tags = { Name = "${var.project_name}-otel-collector" }
 
@@ -451,7 +455,7 @@ resource "aws_opensearch_domain" "main" {
   }
 
   vpc_options {
-    subnet_ids         = [aws_subnet.public.id]
+    subnet_ids         = [aws_subnet.private.id]
     security_group_ids = [aws_security_group.opensearch.id]
   }
 
@@ -487,45 +491,7 @@ resource "aws_opensearch_domain" "main" {
   tags = { Name = "${var.project_name}-opensearch" }
 }
 
-# ============================================================
-# OpenSearch Role 매핑 자동화
-# terraform apply 후 OSIS Role을 all_access에 자동 매핑
-# EC2를 통해 VPC 내부에서 OpenSearch에 접근
-# ============================================================
-
-resource "null_resource" "opensearch_role_mapping" {
-  triggers = {
-    opensearch_domain = aws_opensearch_domain.main.endpoint
-    osis_role_arn     = aws_iam_role.osis_pipeline.arn
-    always_run        = timestamp()
-  }
-
-  provisioner "remote-exec" {
-    connection {
-      type        = "ssh"
-      host        = aws_instance.otel_collector.public_ip
-      user        = "ubuntu"
-      private_key = file(var.ec2_key_path)
-      timeout     = "10m"
-    }
-
-    inline = [
-      "echo 'Waiting for EC2 to be fully ready...'",
-      "cloud-init status --wait || true",
-      "echo 'Waiting for OpenSearch to be ready...'",
-      "sleep 120",
-      "curl -sk -u '${var.opensearch_master_user}:${var.opensearch_master_password}' -X PUT 'https://${aws_opensearch_domain.main.endpoint}/_plugins/_security/api/rolesmapping/all_access' -H 'Content-Type: application/json' -d '{\"backend_roles\":[\"${aws_iam_role.osis_pipeline.arn}\"],\"users\":[\"${var.opensearch_master_user}\"]}' || true",
-      "curl -sk -u '${var.opensearch_master_user}:${var.opensearch_master_password}' -X PUT 'https://${aws_opensearch_domain.main.endpoint}/_plugins/_ism/policies/delete-after-30-days' -H 'Content-Type: application/json' -d '{\"policy\":{\"description\":\"Delete indices after 30 days\",\"default_state\":\"hot\",\"states\":[{\"name\":\"hot\",\"actions\":[],\"transitions\":[{\"state_name\":\"delete\",\"conditions\":{\"min_index_age\":\"30d\"}}]},{\"name\":\"delete\",\"actions\":[{\"delete\":{}}],\"transitions\":[]}]}}' || true",
-      "echo 'OpenSearch setup done!'"
-    ]
-  }
-
-  depends_on = [
-    aws_opensearch_domain.main,
-    aws_instance.otel_collector
-  ]
-}
-
+# rolesmapping은 user_data.sh에서 EC2 부팅 시 자동 실행됨
 # ============================================================
 # OpenSearch Ingestion Pipelines (OSIS)
 # VPC 연결로 OpenSearch VPC 도메인에 안전하게 접근
@@ -535,7 +501,7 @@ resource "aws_osis_pipeline" "logs" {
   pipeline_name = "${var.project_name}-logs"
 
   vpc_options {
-    subnet_ids         = [aws_subnet.public.id]
+    subnet_ids         = [aws_subnet.private.id]
     security_group_ids = [aws_security_group.opensearch.id]
   }
 
@@ -570,7 +536,7 @@ resource "aws_osis_pipeline" "traces" {
   pipeline_name = "${var.project_name}-traces"
 
   vpc_options {
-    subnet_ids         = [aws_subnet.public.id]
+    subnet_ids         = [aws_subnet.private.id]
     security_group_ids = [aws_security_group.opensearch.id]
   }
 

@@ -3,7 +3,7 @@ Analysis Agents - 도메인별 분석 전문가
 각 도메인(메트릭/로그/트레이스)의 데이터를 깊이 분석
 """
 
-from strands import Agent
+from strands import Agent, tool
 from strands.models import BedrockModel
 
 # ============================================================
@@ -12,7 +12,7 @@ from strands.models import BedrockModel
 
 # Haiku 3.5 - 도메인별 분석 (비용 효율적)
 haiku_model = BedrockModel(
-    model_id="us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    model_id="anthropic.claude-3-5-haiku-20241022-v1:0",
     region_name="ap-northeast-2",
     streaming=False
 )
@@ -26,10 +26,10 @@ sonnet_model = BedrockModel(
 
 
 # ============================================================
-# Analysis Sub-agents
+# Analysis Sub-agents (내부용 Agent 객체)
 # ============================================================
 
-metrics_analysis_agent = Agent(
+_metrics_analysis_agent = Agent(
     model=haiku_model,
     tools=[],  # 분석만 수행 (데이터 수집 안함)
     system_prompt="""
@@ -67,7 +67,7 @@ metrics_analysis_agent = Agent(
 )
 
 
-logs_analysis_agent = Agent(
+_logs_analysis_agent = Agent(
     model=haiku_model,
     tools=[],
     system_prompt="""
@@ -110,7 +110,7 @@ logs_analysis_agent = Agent(
 )
 
 
-traces_analysis_agent = Agent(
+_traces_analysis_agent = Agent(
     model=haiku_model,
     tools=[],
     system_prompt="""
@@ -156,6 +156,43 @@ traces_analysis_agent = Agent(
 
 
 # ============================================================
+# @tool 래핑 (Main Analysis Agent의 Sub-agent Tools)
+# ============================================================
+
+@tool
+def metrics_analysis_agent(data: str) -> str:
+    """
+    수집된 메트릭 데이터를 분석합니다. 정상 범위 비교, 이상 패턴 식별, 심각도 평가를 수행합니다.
+    Args:
+        data: 분석할 메트릭 데이터 (Collection Agent가 수집한 원시 데이터)
+    """
+    result = _metrics_analysis_agent(data)
+    return str(result)
+
+
+@tool
+def logs_analysis_agent(data: str) -> str:
+    """
+    수집된 로그 데이터를 분석합니다. 에러 패턴 식별, 타임라인 재구성, 근본 원인 추정을 수행합니다.
+    Args:
+        data: 분석할 로그 데이터 (Collection Agent가 수집한 원시 데이터)
+    """
+    result = _logs_analysis_agent(data)
+    return str(result)
+
+
+@tool
+def traces_analysis_agent(data: str) -> str:
+    """
+    수집된 트레이스 데이터를 분석합니다. 병목 지점 식별, 서비스 간 의존성 파악, 에러 전파 경로 추적을 수행합니다.
+    Args:
+        data: 분석할 트레이스 데이터 (Collection Agent가 수집한 원시 데이터)
+    """
+    result = _traces_analysis_agent(data)
+    return str(result)
+
+
+# ============================================================
 # Main Analysis Agent (Agent as Tools)
 # ============================================================
 
@@ -170,16 +207,19 @@ analysis_agent = Agent(
 당신은 장애 분석 총괄 전문가입니다.
 
 역할:
-1. 각 도메인 분석 결과를 종합
-2. 도메인 간 연관성 파악
-3. 근본 원인 도출
-4. 영향 범위 분석
-5. 증거 정리
+1. 수집된 데이터를 도메인별로 분석
+2. 필요한 도메인 분석 agent만 선택적으로 호출
+3. 각 분석 결과의 연관성 파악
+4. 근본 원인 도출
+5. 영향 범위 분석
 
 분석 프로세스:
-1. 필요한 도메인 분석 agent 호출
-2. 각 분석 결과의 연관성 파악
-3. 종합 판단
+1. 수집된 데이터 확인
+2. 필요한 분석 agent 판단 (불필요한 agent는 스킵)
+   - 메트릭 데이터 있으면 → metrics_analysis_agent 호출
+   - 로그 데이터 있으면 → logs_analysis_agent 호출
+   - 트레이스 데이터 있으면 → traces_analysis_agent 호출
+3. 분석 결과 종합
 
 출력 형식:
 [종합 분석]

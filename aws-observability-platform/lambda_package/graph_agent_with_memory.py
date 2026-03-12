@@ -1,4 +1,4 @@
-"""
+﻿"""
 AWS Observability Platform - Graph Agent with Memory
 기존 LangGraph 구조 유지 + DynamoDB 장기 메모리 추가
 """
@@ -78,13 +78,13 @@ class ObservabilityState(TypedDict):
 
 # 🔵 Haiku 3.5 - 분류 작업 (비용 효율적)
 classify_llm = ChatBedrockConverse(
-    model="us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    model="apac.anthropic.claude-sonnet-4-20250514-v1:0",
     region_name="ap-northeast-2",
 )
 
 # 🟢 Sonnet 3.5 v2 - Collection/Analysis Main Agent (고품질)
 sonnet_model = BedrockModel(
-    model_id="apac.anthropic.claude-3-5-sonnet-20241022-v2:0",
+    model_id="apac.anthropic.claude-sonnet-4-20250514-v1:0",
     region_name="ap-northeast-2",
     streaming=False
 )
@@ -180,8 +180,13 @@ def collection_agent_node(state: ObservabilityState) -> ObservabilityState:
     # Collection Agent 실행
     result = collection_agent(question)
     
+    # 디버그: metrics_agent 결과 로깅
+    result_str = str(result)
+    print(f"[DEBUG] Collection 결과 ({len(result_str)}자):")
+    print(result_str[:3000])
+    
     print(f"✅ Collection Agent 완료")
-    return {**state, "collection_result": str(result)}
+    return {**state, "collection_result": result_str}
 
 
 def runbook_node(state: ObservabilityState) -> ObservabilityState:
@@ -311,8 +316,8 @@ def report_agent_node(state: ObservabilityState) -> ObservabilityState:
 }}
 """
     
-    # Session ID 생성
-    session_id = f"incident-{alert_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    # Session ID 생성 (공백 제거)
+    session_id = f"incident-{alert_name.replace(' ', '-')}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
     
     try:
         # Bedrock Agent Runtime 호출
@@ -341,13 +346,25 @@ def report_agent_node(state: ObservabilityState) -> ObservabilityState:
                 cleaned_text = cleaned_text.split('```json')[1].split('```')[0].strip()
             elif '```' in cleaned_text:
                 cleaned_text = cleaned_text.split('```')[1].split('```')[0].strip()
-            
             if '{' in cleaned_text and '}' in cleaned_text:
                 start_idx = cleaned_text.find('{')
                 end_idx = cleaned_text.rfind('}') + 1
                 cleaned_text = cleaned_text[start_idx:end_idx]
-            
             parsed = json.loads(cleaned_text)
+            
+            # runbook_references가 비어있으면 runbook_result에서 직접 주입
+            if not parsed.get("runbook_references") and runbook_result and runbook_result != "관련 런북 없음":
+                refs = []
+                seen = set()
+                for line in runbook_result.split("\n"):
+                    if line.startswith("[") and "]" in line:
+                        filename = line.split("[")[1].split("]")[0]
+                        if filename not in seen:
+                            seen.add(filename)
+                            refs.append({"title": filename, "summary": filename.replace(".md", "") + " 런북 참조"})
+                parsed["runbook_references"] = refs
+                print(f"📚 runbook_references 직접 주입: {len(refs)}건")
+            
             final = json.dumps(parsed, ensure_ascii=False)
             
         except json.JSONDecodeError as e:

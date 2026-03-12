@@ -112,7 +112,7 @@ def build_alert_message(alert_info: str, severity: str = "critical") -> dict:
                     },
                     {
                         "type": "context",
-                        "elements": [{"type": "mrkdwn", "text": "⏳ Metrics · Logs · Traces · 런북 분석 중입니다..."}]
+                        "elements": [{"type": "mrkdwn", "text": "⏳ 분석 중..."}]
                     }
                 ]
             }
@@ -220,24 +220,31 @@ def build_incident_report_message(
             "type": "section",
             "text": {"type": "mrkdwn", "text": "*📖 참조 런북*\n" + "\n".join(rb_lines)}
         })
+    else:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*📖 참조 런북*\n참조할 런북이 없습니다"}
+        })
 
-    # ── AMP 링크 버튼 ─────────────────────────────────────
-    # Grafana 연동 시 활성화
-    # if amp_link:
-    #     blocks.append({
-    #         "type": "actions",
-    #         "elements": [{
-    #             "type": "button",
-    #             "text": {"type": "plain_text", "text": "📈 그래프 보기", "emoji": True},
-    #             "url": amp_link,
-    #             "style": "primary"
-    #         }]
-    #     })
+    # ── 해결 완료 버튼 ────────────────────────────────────
+    alert_name = alert_info.split('\n')[0].strip()
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "✅ 해결 완료", "emoji": True},
+                "style": "primary",
+                "action_id": "resolve_incident",
+                "value": alert_name
+            }
+        ]
+    })
 
     # ── 하단 컨텍스트 ─────────────────────────────────────
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": f"Scenario: `{alert_info.split(' ')[0]}` | 분석 완료"}]
+        "elements": [{"type": "mrkdwn", "text": f"Scenario: `{alert_name}` | 분석 완료"}]
     })
 
     return {

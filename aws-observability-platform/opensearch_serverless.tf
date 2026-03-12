@@ -61,8 +61,9 @@ resource "aws_opensearchserverless_access_policy" "runbooks" {
       aws_iam_role.lambda_agent.arn,
       aws_iam_role.bedrock_agent.arn,
       aws_iam_role.bedrock_kb.arn,
-      aws_iam_role.lambda_kb_sync.arn,
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+      # aws_iam_role.lambda_kb_sync.arn,  # KB 생성 후 추가
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/admin"
     ]
   }])
 }
@@ -95,22 +96,27 @@ resource "aws_lambda_function" "aoss_index_creator" {
   source_code_hash = data.archive_file.lambda_agent.output_base64sha256
   timeout          = 60
   memory_size      = 256
+  layers           = [aws_lambda_layer_version.agent_deps.arn]
 
   tags = { Name = "${var.project_name}-aoss-index-creator" }
 }
 
-# Lambda 호출로 인덱스 생성 (수동 실행 필요)
-# AOSS 정책 전파에 최대 5분 소요되므로 terraform apply 후 수동으로 실행
+# 인덱스 수동 생성 필요
+# terraform apply 완료 후 아래 명령어 실행:
+# aws lambda invoke --function-name log-platform-dev-aoss-index-creator --region ap-northeast-2 --payload file://scripts/kb_index_payload.json kb_index_response.json
+
 resource "null_resource" "create_kb_index" {
+  provisioner "local-exec" {
+    command = <<-EOT
+      echo '{"endpoint": "${replace(aws_opensearchserverless_collection.runbooks.collection_endpoint, "https://", "")}", "region": "${var.aws_region}", "index_name": "bedrock-knowledge-base-default-index"}' > ${path.module}/scripts/kb_index_payload_generated.json
+      aws lambda invoke --function-name ${aws_lambda_function.aoss_index_creator.function_name} --region ${var.aws_region} --cli-binary-format raw-in-base64-out --payload file://${path.module}/scripts/kb_index_payload_generated.json ${path.module}/kb_index_response.json
+    EOT
+  }
+
   triggers = {
     collection_endpoint = aws_opensearchserverless_collection.runbooks.collection_endpoint
     lambda_hash         = aws_lambda_function.aoss_index_creator.source_code_hash
   }
-
-  # 자동 실행 비활성화 - 수동으로 실행 필요
-  # provisioner "local-exec" {
-  #   command = "echo '인덱스는 수동으로 생성하세요'"
-  # }
 
   depends_on = [
     aws_opensearchserverless_collection.runbooks,
@@ -175,6 +181,12 @@ resource "aws_iam_role_policy" "bedrock_kb" {
 
 # ============================================================
 # Bedrock Knowledge Base
+# 주의: 인덱스 생성 후 수동으로 생성 필요
+# ============================================================
+
+# ============================================================
+# Bedrock Knowledge Base
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
 
 resource "aws_bedrockagent_knowledge_base" "runbooks" {
@@ -211,6 +223,7 @@ resource "aws_bedrockagent_knowledge_base" "runbooks" {
 
 # ============================================================
 # Bedrock Knowledge Base 데이터 소스 (S3)
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
 
 resource "aws_bedrockagent_data_source" "runbooks" {
@@ -248,6 +261,7 @@ resource "aws_s3_bucket_notification" "runbooks" {
 
 # ============================================================
 # KB 동기화 Lambda IAM
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
 
 resource "aws_iam_role" "lambda_kb_sync" {
@@ -263,6 +277,7 @@ resource "aws_iam_role" "lambda_kb_sync" {
   })
 }
 
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 resource "aws_iam_role_policy" "lambda_kb_sync" {
   name = "${var.project_name}-lambda-kb-sync-policy"
   role = aws_iam_role.lambda_kb_sync.id
@@ -271,9 +286,9 @@ resource "aws_iam_role_policy" "lambda_kb_sync" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "BedrockKBSync"
-        Effect = "Allow"
-        Action = ["bedrock:StartIngestionJob", "bedrock:GetIngestionJob"]
+        Sid      = "BedrockKBSync"
+        Effect   = "Allow"
+        Action   = ["bedrock:StartIngestionJob", "bedrock:GetIngestionJob"]
         Resource = aws_bedrockagent_knowledge_base.runbooks.arn
       },
       {
@@ -288,16 +303,17 @@ resource "aws_iam_role_policy" "lambda_kb_sync" {
 
 # ============================================================
 # KB 동기화 Lambda
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
-
+# 
 resource "aws_lambda_function" "kb_sync" {
-  function_name    = "${var.project_name}-kb-sync"
-  role             = aws_iam_role.lambda_kb_sync.arn
-  handler          = "runbooks_aws.indexing_handler"
-  runtime          = "python3.12"
-  timeout          = 60
-  memory_size      = 128
-  layers           = [aws_lambda_layer_version.agent_deps.arn]
+  function_name = "${var.project_name}-kb-sync"
+  role          = aws_iam_role.lambda_kb_sync.arn
+  handler       = "runbooks_aws.indexing_handler"
+  runtime       = "python3.12"
+  timeout       = 60
+  memory_size   = 128
+  layers        = [aws_lambda_layer_version.agent_deps.arn]
 
   filename         = data.archive_file.lambda_agent.output_path
   source_code_hash = data.archive_file.lambda_agent.output_base64sha256
@@ -315,6 +331,7 @@ resource "aws_lambda_function" "kb_sync" {
 
 # ============================================================
 # EventBridge Rule - S3 runbooks/*.md 업로드 감지
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
 
 resource "aws_cloudwatch_event_rule" "runbooks_s3_upload" {
@@ -322,7 +339,7 @@ resource "aws_cloudwatch_event_rule" "runbooks_s3_upload" {
   description = "S3 런북 업로드 감지 → KB 동기화"
 
   event_pattern = jsonencode({
-    source      = ["aws.s3"]
+    source        = ["aws.s3"]
     "detail-type" = ["Object Created"]
     detail = {
       bucket = { name = [aws_s3_bucket.runbooks.id] }
@@ -331,12 +348,14 @@ resource "aws_cloudwatch_event_rule" "runbooks_s3_upload" {
   })
 }
 
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 resource "aws_cloudwatch_event_target" "kb_sync_lambda" {
   rule      = aws_cloudwatch_event_rule.runbooks_s3_upload.name
   target_id = "KBSyncLambda"
   arn       = aws_lambda_function.kb_sync.arn
 }
 
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 resource "aws_lambda_permission" "eventbridge_kb_sync" {
   statement_id  = "AllowEventBridgeTrigger"
   action        = "lambda:InvokeFunction"
@@ -347,6 +366,7 @@ resource "aws_lambda_permission" "eventbridge_kb_sync" {
 
 # ============================================================
 # Lambda IAM - Bedrock KB 검색 권한 (분석 에이전트용)
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
 
 resource "aws_iam_role_policy" "lambda_bedrock_kb" {
@@ -383,6 +403,7 @@ resource "aws_iam_role_policy" "lambda_bedrock_kb" {
 
 # ============================================================
 # Outputs
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
 
 output "knowledge_base_id" {
@@ -393,4 +414,9 @@ output "knowledge_base_id" {
 output "knowledge_base_data_source_id" {
   value       = aws_bedrockagent_data_source.runbooks.data_source_id
   description = "Knowledge Base 데이터 소스 ID"
+}
+
+output "runbooks_collection_endpoint" {
+  value       = aws_opensearchserverless_collection.runbooks.collection_endpoint
+  description = "AOSS Runbooks 컬렉션 엔드포인트"
 }

@@ -274,3 +274,33 @@ echo "Envoy  : 4317(gRPC) / 4318(HTTP) - JWT 인증"
 echo "OTel   : 14317(gRPC) / 14318(HTTP) - 내부 전용"
 echo "Grafana: 3000"
 echo "====================================="
+
+# ============================================================
+# OpenSearch rolesmapping 자동 설정
+# OpenSearch가 준비될 때까지 대기 후 OSIS role 매핑
+# ============================================================
+OPENSEARCH_ENDPOINT="${opensearch_endpoint}"
+OPENSEARCH_USER="${opensearch_master_user}"
+OPENSEARCH_PASSWORD="${opensearch_master_password}"
+OSIS_ROLE_ARN="${osis_role_arn}"
+
+echo "OpenSearch rolesmapping 설정 대기 중..."
+for i in $(seq 1 40); do
+  STATUS=$(curl -s -o /dev/null -w "%%{http_code}" \
+    -u "$OPENSEARCH_USER:$OPENSEARCH_PASSWORD" \
+    "https://$OPENSEARCH_ENDPOINT/_cluster/health" 2>/dev/null)
+  if [ "$STATUS" = "200" ]; then
+    echo "OpenSearch 준비 완료 ($i번째 시도)"
+    break
+  fi
+  echo "OpenSearch 대기 중... ($i/40, status=$STATUS)"
+  sleep 30
+done
+
+# OSIS role → all_access 매핑
+RESULT=$(curl -s -X PUT "https://$OPENSEARCH_ENDPOINT/_plugins/_security/api/rolesmapping/all_access" \
+  -H "Content-Type: application/json" \
+  -u "$OPENSEARCH_USER:$OPENSEARCH_PASSWORD" \
+  -d "{\"backend_roles\":[\"$OSIS_ROLE_ARN\"],\"hosts\":[],\"users\":[\"$OPENSEARCH_USER\"]}")
+
+echo "rolesmapping 결과: $RESULT"

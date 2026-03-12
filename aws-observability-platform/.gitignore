@@ -20,3 +20,9 @@
 
 # crash
 crash.log
+
+# lambda test responses
+*_response.json
+*_payload.json
+response.json
+policy.json

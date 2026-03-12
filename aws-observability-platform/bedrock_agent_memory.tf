@@ -4,6 +4,84 @@
 
 # ============================================================
 # OpenSearch Serverless - 장애 이력 저장 (장기 메모리)
+#
+# ⚠️ 배포 순서:
+# 1. terraform apply (AOSS 컬렉션 생성)
+# 2. Dev Tools에서 인덱스 수동 생성 (아래 가이드 참조)
+#
+# 📋 인덱스 생성 가이드:
+# AWS Console → OpenSearch Serverless → Collections
+# → log-platform-dev-incident-memory → OpenSearch Dashboards URL 클릭
+# → Dev Tools에서 아래 명령어 실행:
+#
+# PUT /incident-memory-index
+# {
+#   "settings": {
+#     "index": {"knn": true, "knn.algo_param.ef_search": 512}
+#   },
+#   "mappings": {
+#     "properties": {
+#       "incident_id": {"type": "keyword"},
+#       "alert_name": {"type": "keyword"},
+#       "timestamp": {"type": "date"},
+#       "severity": {"type": "keyword"},
+#       "status": {"type": "keyword"},
+#       "resolved_at": {"type": "date"},
+#       "root_cause": {"type": "text", "analyzer": "standard"},
+#       "resolution": {"type": "text", "analyzer": "standard"},
+#       "resolution_time_minutes": {"type": "float"},
+#       "metrics": {
+#         "properties": {
+#           "session_id": {"type": "keyword"},
+#           "is_recurring": {"type": "boolean"},
+#           "past_occurrences": {"type": "integer"},
+#           "jvm_memory_used": {"type": "float"},
+#           "cpu_usage": {"type": "float"},
+#           "http_error_rate": {"type": "float"}
+#         }
+#       },
+#       "log_pattern_vector": {
+#         "type": "knn_vector",
+#         "dimension": 1024,
+#         "method": {
+#           "engine": "faiss",
+#           "name": "hnsw",
+#           "space_type": "l2",
+#           "parameters": {"ef_construction": 512, "m": 16}
+#         }
+#       },
+#       "error_messages": {"type": "text", "analyzer": "standard"},
+#       "tags": {"type": "keyword"}
+#     }
+#   }
+# }
+
+# PUT /bedrock-knowledge-base-default-index
+# {
+#   "settings": {
+#     "index": {
+#       "knn": true,
+#       "knn.algo_param.ef_search": 512
+#     }
+#   },
+#   "mappings": {
+#     "properties": {
+#       "AMAZON_BEDROCK_METADATA": {"type": "text", "index": false},
+#       "AMAZON_BEDROCK_TEXT_CHUNK": {"type": "text"},
+#       "bedrock-knowledge-base-default-vector": {
+#         "type": "knn_vector",
+#         "dimension": 1024,
+#         "method": {
+#           "engine": "faiss",
+#           "name": "hnsw",
+#           "space_type": "l2",
+#           "parameters": {"ef_construction": 512, "m": 16}
+#         }
+#       }
+#     }
+#   }
+# }
+
 # ============================================================
 
 # 장애 이력용 AOSS 컬렉션 (런북과 분리)
@@ -78,29 +156,30 @@ resource "aws_opensearchserverless_access_policy" "incident_memory" {
     Principal = [
       aws_iam_role.lambda_agent.arn,
       aws_iam_role.bedrock_agent.arn,
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/admin"
     ]
   }])
-  
+
   depends_on = [aws_opensearchserverless_collection.incident_memory]
 }
 
 # 인덱스 생성 Lambda
 resource "aws_lambda_function" "incident_memory_index_creator" {
-  function_name    = "${var.project_name}-incident-memory-index-creator"
-  role             = aws_iam_role.lambda_agent.arn
-  handler          = "incident_memory_index_creator.handler"
-  runtime          = "python3.12"
-  timeout          = 60
-  memory_size      = 256
-  layers           = [aws_lambda_layer_version.agent_deps.arn]
+  function_name = "${var.project_name}-incident-memory-index-creator"
+  role          = aws_iam_role.lambda_agent.arn
+  handler       = "incident_memory_index_creator.handler"
+  runtime       = "python3.12"
+  timeout       = 60
+  memory_size   = 256
+  layers        = [aws_lambda_layer_version.agent_deps.arn]
 
   filename         = data.archive_file.lambda_agent.output_path
   source_code_hash = data.archive_file.lambda_agent.output_base64sha256
 
   environment {
     variables = {
-      AOSS_ENDPOINT = aws_opensearchserverless_collection.incident_memory.collection_endpoint
+      AOSS_ENDPOINT   = aws_opensearchserverless_collection.incident_memory.collection_endpoint
       AWS_REGION_NAME = var.aws_region
     }
   }
@@ -108,17 +187,15 @@ resource "aws_lambda_function" "incident_memory_index_creator" {
   tags = { Name = "${var.project_name}-incident-memory-index-creator" }
 }
 
-# 인덱스 자동 생성
+# 인덱스 수동 생성 필요
+# terraform apply 완료 후 아래 명령어 실행:
+# aws lambda invoke --function-name log-platform-dev-incident-memory-index-creator --region ap-northeast-2 --payload file://scripts/incident_memory_payload.json incident_memory_response.json
+
 resource "null_resource" "create_incident_memory_index" {
   provisioner "local-exec" {
     command = <<-EOT
-      sleep 60
-      aws lambda invoke \
-        --function-name ${aws_lambda_function.incident_memory_index_creator.function_name} \
-        --region ${var.aws_region} \
-        --cli-binary-format raw-in-base64-out \
-        --payload '{"endpoint":"${aws_opensearchserverless_collection.incident_memory.collection_endpoint}","region":"${var.aws_region}","index_name":"incident-memory-index"}' \
-        /tmp/incident_memory_index_response.json || true
+      echo '{"endpoint": "${replace(aws_opensearchserverless_collection.incident_memory.collection_endpoint, "https://", "")}", "region": "${var.aws_region}", "index_name": "incident-memory-index"}' > ${path.module}/scripts/incident_memory_payload_generated.json
+      aws lambda invoke --function-name ${aws_lambda_function.incident_memory_index_creator.function_name} --region ${var.aws_region} --cli-binary-format raw-in-base64-out --payload file://${path.module}/scripts/incident_memory_payload_generated.json ${path.module}/incident_memory_response.json
     EOT
   }
 
@@ -141,7 +218,7 @@ resource "aws_bedrockagent_agent" "observability" {
   agent_name              = "${var.project_name}-observability-agent"
   agent_resource_role_arn = aws_iam_role.bedrock_agent.arn
   foundation_model        = "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
-  
+
   description = "AWS 옵저버빌리티 플랫폼 AI 에이전트 - 장애 분석 및 대응"
 
   instruction = <<-EOT
@@ -151,12 +228,18 @@ resource "aws_bedrockagent_agent" "observability" {
 1. 알람 발생 시 메트릭, 로그, 트레이스를 분석하여 근본 원인 파악
 2. 과거 유사 장애 이력을 참조하여 빠른 해결 방법 제시
 3. 즉시 조치 및 후속 조치 권장
-4. 관련 런북 참조
+4. 관련 런북 참조 (Knowledge Base에서 검색된 런북만 포함)
 
 과거 장애 이력 활용:
 - 동일 알람이 과거에 발생한 적이 있다면, 그때의 원인과 해결 방법을 우선 참조
 - 평균 해결 시간과 가장 흔한 원인을 고려
 - 새로운 패턴이 발견되면 명시적으로 언급
+
+**CRITICAL - 런북 참조 규칙:**
+- runbook_references는 ALWAYS 빈 배열 []로 반환하세요
+- Knowledge Base가 비어있으므로 절대로 런북을 참조하지 마세요
+- spring-boot-troubleshooting.md 같은 파일명을 만들어내지 마세요
+- 런북 관련 내용은 일체 생성하지 마세요
 
 **중요: 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트는 포함하지 마세요.**
 
@@ -170,8 +253,10 @@ resource "aws_bedrockagent_agent" "observability" {
   "immediate_actions": ["즉시 조치1", "즉시 조치2"],
   "follow_up_actions": ["후속 조치1"],
   "evidence_summary": ["근거1", "근거2"],
-  "runbook_references": [{"source": "파일명", "section": "섹션", "relevance": "관련성"}]
+  "runbook_references": []
 }
+
+runbook_references는 ALWAYS 빈 배열 []이어야 합니다. 절대로 런북을 만들어내지 마세요.
 EOT
 
   # 메모리 활성화
@@ -198,7 +283,9 @@ resource "aws_bedrockagent_agent_alias" "prod" {
 
 # ============================================================
 # Knowledge Base 연결
+# ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
+
 resource "aws_bedrockagent_agent_knowledge_base_association" "runbooks" {
   agent_id             = aws_bedrockagent_agent.observability.id
   agent_version        = "DRAFT"
@@ -224,6 +311,14 @@ resource "aws_iam_role_policy" "lambda_aoss_incident_memory" {
           "aoss:APIAccessAll"
         ]
         Resource = aws_opensearchserverless_collection.incident_memory.arn
+      },
+      {
+        Sid    = "AOSSRunbooksAccess"
+        Effect = "Allow"
+        Action = [
+          "aoss:APIAccessAll"
+        ]
+        Resource = aws_opensearchserverless_collection.runbooks.arn
       },
       {
         Sid    = "BedrockEmbeddings"
@@ -252,13 +347,13 @@ resource "aws_iam_role_policy" "lambda_aoss_incident_memory" {
 # Lambda - Bedrock Agent Runtime 호출 (SNS 트리거)
 # ============================================================
 resource "aws_lambda_function" "agent_runtime" {
-  function_name    = "${var.project_name}-agent-runtime"
-  role             = aws_iam_role.lambda_agent.arn
-  handler          = "bedrock_agent_memory.lambda_handler"
-  runtime          = "python3.12"
-  timeout          = 120
-  memory_size      = 512
-  layers           = [aws_lambda_layer_version.agent_deps.arn]
+  function_name = "${var.project_name}-agent-runtime"
+  role          = aws_iam_role.lambda_agent.arn
+  handler       = "bedrock_agent_memory.lambda_handler"
+  runtime       = "python3.12"
+  timeout       = 120
+  memory_size   = 512
+  layers        = [aws_lambda_layer_version.agent_deps.arn]
 
   filename         = data.archive_file.lambda_agent.output_path
   source_code_hash = data.archive_file.lambda_agent.output_base64sha256
