@@ -1,0 +1,16 @@
+##This is snippet of docker compose manifest
+prometheus:
+    image: prom/prometheus:v2.51.1
+    container_name: otel-gateway-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus-config.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=1h
+      - --enable-feature=otlp-write-receiver
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus-config.yaml:/etc/prometheus/prometheus-config.yaml
+      - ./prometheus-rules.yaml:/etc/prometheus/prometheus-rules.yaml
+    restart: unless-stopped
+    ports:
+      - "9090:9090"

@@ -9,16 +9,24 @@ systemctl start docker
 
 # OpenTelemetry Collector 설치
 cd /tmp
-wget https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.115.1/otelcol-contrib_0.115.1_linux_amd64.tar.gz
-tar -xzf otelcol-contrib_0.115.1_linux_amd64.tar.gz
+wget https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.147.0/otelcol-contrib_0.147.0_linux_amd64.tar.gz
+tar -xzf otelcol-contrib_0.147.0_linux_amd64.tar.gz
 mv otelcol-contrib /usr/local/bin/
-rm otelcol-contrib_0.115.1_linux_amd64.tar.gz
+rm otelcol-contrib_0.147.0_linux_amd64.tar.gz
 
 useradd --system --no-create-home --shell /usr/sbin/nologin otelcol || true
 mkdir -p /etc/otelcol
 chown -R otelcol:otelcol /etc/otelcol
 
 cat > /etc/otelcol/config.yaml <<EOF
+extensions:
+  sigv4auth/aps:
+    region: ${aws_region}
+    service: aps
+  sigv4auth/es:
+    region: ${aws_region}
+    service: es
+
 receivers:
   otlp:
     protocols:
@@ -28,70 +36,199 @@ receivers:
         endpoint: 0.0.0.0:14318
 
 processors:
-  batch:
-    timeout: 5s
-    send_batch_size: 512
   memory_limiter:
-    check_interval: 5s
-    limit_mib: 700
-    spike_limit_mib: 100
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  batch:
+    timeout: 10s
+    send_batch_size: 2048
+
+  resource/common:
+    attributes:
+      - key: service.namespace
+        value: "todolist"
+        action: upsert
+      - key: deployment.environment
+        value: "dev"
+        action: upsert
+
+  resource/app:
+    attributes:
+      - key: source
+        value: "app"
+        action: upsert
+
+  resource/sys:
+    attributes:
+      - key: source
+        value: "sys"
+        action: upsert
+      - key: log.source
+        value: "syslog"
+        action: upsert
+
+  resource/host:
+    attributes:
+      - key: source
+        value: "host"
+        action: upsert
+
+  resource/container:
+    attributes:
+      - key: source
+        value: "container"
+        action: upsert
+
+  transform/trim_service_name:
+    error_mode: ignore
+    log_statements:
+      - context: resource
+        statements:
+          - set(attributes["service.name"], Trim(attributes["service.name"]))
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["service.name"], Trim(attributes["service.name"]))
+    trace_statements:
+      - context: resource
+        statements:
+          - set(attributes["service.name"], Trim(attributes["service.name"]))
+
+  transform/fix_hostlog_timestamp:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(time, Now()) where time_unix_nano == 0
+
+connectors:
+  routing/metrics:
+    table:
+      - condition: resource.attributes["source"] == "container"
+        pipelines: [metrics/container]
+      - condition: resource.attributes["source"] == "host"
+        pipelines: [metrics/host]
+    default_pipelines: [metrics/app]
+
+  routing/logs:
+    table:
+      - condition: resource.attributes["source"] == "sys"
+        pipelines: [logs/host]
+    default_pipelines: [logs/app]
 
 exporters:
+  debug:
+    verbosity: basic
+
   prometheusremotewrite:
     endpoint: ${amp_remote_write_url}api/v1/remote_write
     auth:
       authenticator: sigv4auth/aps
-  otlphttp/logs:
-    endpoint: https://${osis_logs_endpoint}
-    compression: none
-    auth:
-      authenticator: sigv4auth
-  otlphttp/traces:
-    endpoint: https://${osis_traces_endpoint}
-    compression: none
-    auth:
-      authenticator: sigv4auth
+    timeout: 30s
+    remote_write_queue:
+      enabled: true
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  opensearch/logs_app:
+    http:
+      endpoint: https://${opensearch_endpoint}
+      auth:
+        authenticator: sigv4auth/es
+    logs_index: "logs-app"
+    timeout: 30s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 2048
+
+  opensearch/logs_host:
+    http:
+      endpoint: https://${opensearch_endpoint}
+      auth:
+        authenticator: sigv4auth/es
+    logs_index: "logs-host"
+    timeout: 30s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 2048
+
+  opensearch/traces:
+    http:
+      endpoint: https://${opensearch_endpoint}
+      auth:
+        authenticator: sigv4auth/es
+    traces_index: "traces-app"
+    timeout: 30s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 2048
+
   awss3/logs:
     s3uploader:
       region: ${aws_region}
       s3_bucket: ${s3_logs_bucket}
-      s3_prefix: logs
+      s3_prefix: "telemetry/raw/logs"
+      compression: gzip
+      file_prefix: logs
+    marshaler: otlp_json
+
   awss3/traces:
     s3uploader:
       region: ${aws_region}
       s3_bucket: ${s3_traces_bucket}
-      s3_prefix: traces
-  awss3/metrics:
-    s3uploader:
-      region: ${aws_region}
-      s3_bucket: ${s3_metrics_bucket}
-      s3_prefix: metrics
-  debug:
-    verbosity: normal
-
-extensions:
-  sigv4auth:
-    region: ${aws_region}
-    service: osis
-  sigv4auth/aps:
-    region: ${aws_region}
-    service: aps
+      s3_prefix: "telemetry/raw/traces"
+      compression: gzip
+      file_prefix: traces
+    marshaler: otlp_json
 
 service:
-  extensions: [sigv4auth, sigv4auth/aps]
+  extensions: [sigv4auth/aps, sigv4auth/es]
+
   pipelines:
-    logs:
+    metrics/ingest:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [otlphttp/logs, awss3/logs, debug]
+      processors: [memory_limiter, resource/common, transform/trim_service_name]
+      exporters: [routing/metrics]
+
+    logs/ingest:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/common, transform/trim_service_name]
+      exporters: [routing/logs]
+
+    metrics/app:
+      receivers: [routing/metrics]
+      processors: [resource/app, batch]
+      exporters: [prometheusremotewrite, debug]
+
+    metrics/container:
+      receivers: [routing/metrics]
+      processors: [resource/container, batch]
+      exporters: [prometheusremotewrite, debug]
+
+    metrics/host:
+      receivers: [routing/metrics]
+      processors: [resource/host, batch]
+      exporters: [prometheusremotewrite, debug]
+
+    logs/app:
+      receivers: [routing/logs]
+      processors: [resource/app, batch]
+      exporters: [opensearch/logs_app, awss3/logs, debug]
+
+    logs/host:
+      receivers: [routing/logs]
+      processors: [resource/sys, transform/fix_hostlog_timestamp, batch]
+      exporters: [opensearch/logs_host, awss3/logs, debug]
+
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [otlphttp/traces, awss3/traces, debug]
-    metrics:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [prometheusremotewrite, awss3/metrics, debug]
+      processors: [memory_limiter, resource/common, resource/app, transform/trim_service_name, batch]
+      exporters: [opensearch/traces, awss3/traces, debug]
 EOF
 
 chown otelcol:otelcol /etc/otelcol/config.yaml
@@ -149,6 +286,7 @@ static_resources:
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
               common_tls_context:
+                alpn_protocols: ["h2"]
                 tls_certificates:
                   - certificate_chain:
                       filename: /etc/envoy/certs/cert.pem
@@ -318,12 +456,13 @@ echo "====================================="
 
 # ============================================================
 # OpenSearch rolesmapping 자동 설정
-# OpenSearch가 준비될 때까지 대기 후 OSIS role 매핑
+# OpenSearch가 준비될 때까지 대기 후 OTel Collector IAM role 매핑
+# (OSIS 제거 → OTel Collector EC2 role이 직접 OpenSearch에 쓰기)
 # ============================================================
 OPENSEARCH_ENDPOINT="${opensearch_endpoint}"
 OPENSEARCH_USER="${opensearch_master_user}"
 OPENSEARCH_PASSWORD="${opensearch_master_password}"
-OSIS_ROLE_ARN="${osis_role_arn}"
+OTEL_COLLECTOR_ROLE_ARN="${otel_collector_role_arn}"
 
 echo "OpenSearch rolesmapping 설정 대기 중..."
 for i in $(seq 1 40); do
@@ -338,10 +477,76 @@ for i in $(seq 1 40); do
   sleep 30
 done
 
-# OSIS role → all_access 매핑
+# OTel Collector IAM role → all_access 매핑
 RESULT=$(curl -s -X PUT "https://$OPENSEARCH_ENDPOINT/_plugins/_security/api/rolesmapping/all_access" \
   -H "Content-Type: application/json" \
   -u "$OPENSEARCH_USER:$OPENSEARCH_PASSWORD" \
-  -d "{\"backend_roles\":[\"$OSIS_ROLE_ARN\"],\"hosts\":[],\"users\":[\"$OPENSEARCH_USER\"]}")
-
+  -d "{\"backend_roles\":[\"$OTEL_COLLECTOR_ROLE_ARN\"],\"hosts\":[],\"users\":[\"$OPENSEARCH_USER\"]}")
 echo "rolesmapping 결과: $RESULT"
+
+# ============================================================
+# ISM 정책 생성 - 30일 후 인덱스 자동 삭제
+# (AWS provider에 ISM 리소스가 없어 user_data에서 처리:
+#  EC2는 VPC 내부 → OpenSearch 직접 접근 가능)
+# ============================================================
+echo "ISM 정책 생성 중..."
+curl -s -X PUT "https://$OPENSEARCH_ENDPOINT/_plugins/_ism/policies/delete-after-30-days" \
+  -H "Content-Type: application/json" \
+  -u "$OPENSEARCH_USER:$OPENSEARCH_PASSWORD" \
+  -d '{
+    "policy": {
+      "description": "Delete indices after 30 days",
+      "default_state": "hot",
+      "states": [
+        {
+          "name": "hot",
+          "actions": [],
+          "transitions": [
+            {
+              "state_name": "delete",
+              "conditions": {
+                "min_index_age": "30d"
+              }
+            }
+          ]
+        },
+        {
+          "name": "delete",
+          "actions": [{ "delete": {} }],
+          "transitions": []
+        }
+      ],
+      "ism_template": [
+        {
+          "index_patterns": ["logs-app*", "logs-host*", "traces-app*"],
+          "priority": 100
+        }
+      ]
+    }
+  }' || true
+echo "ISM 정책 생성 완료"
+
+# ============================================================
+# 인덱스 템플릿 생성 - 신규 인덱스에 ISM 정책 자동 적용
+# ============================================================
+echo "인덱스 템플릿 생성 중..."
+
+for PATTERN in "logs-app" "logs-host" "traces-app"; do
+  curl -s -X PUT "https://$OPENSEARCH_ENDPOINT/_index_template/$${PATTERN}-template" \
+    -H "Content-Type: application/json" \
+    -u "$OPENSEARCH_USER:$OPENSEARCH_PASSWORD" \
+    -d "{
+      \"index_patterns\": [\"$${PATTERN}*\"],
+      \"template\": {
+        \"settings\": {
+          \"plugins.index_state_management.policy_id\": \"delete-after-30-days\",
+          \"number_of_shards\": 1,
+          \"number_of_replicas\": 0
+        }
+      },
+      \"priority\": 100
+    }" || true
+  echo "  템플릿 생성: $${PATTERN}-template"
+done
+
+echo "인덱스 템플릿 생성 완료"

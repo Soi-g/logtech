@@ -349,7 +349,7 @@ resource "aws_iam_role_policy" "lambda_aoss_incident_memory" {
 resource "aws_lambda_function" "agent_runtime" {
   function_name = "${var.project_name}-agent-runtime"
   role          = aws_iam_role.lambda_agent.arn
-  handler       = "bedrock_agent_memory.lambda_handler"
+  handler       = "bedrock_agent_runtime_handler.lambda_handler"
   runtime       = "python3.12"
   timeout       = 120
   memory_size   = 512

@@ -186,6 +186,8 @@ resource "aws_lambda_function" "agent" {
       SLACK_BOT_TOKEN               = var.slack_bot_token
       SLACK_CHANNEL                 = var.slack_channel
       AWS_REGION_NAME               = var.aws_region
+      # Phase 1: AgentCore Memory (AOSS와 병렬 운영, 비어있으면 스킵)
+      AGENTCORE_MEMORY_ID           = var.agentcore_memory_id
     }
   }
 

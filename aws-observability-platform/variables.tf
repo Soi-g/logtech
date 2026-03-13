@@ -60,6 +60,12 @@ variable "slack_channel" {
   type        = string
 }
 
+variable "agentcore_memory_id" {
+  description = "Bedrock AgentCore Memory Store ID (create-memory CLI로 생성 후 설정)"
+  type        = string
+  default     = ""
+}
+
 # variable "slack_webhook_url" {
 #   description = "Slack Webhook URL for alerts"
 #   type        = string

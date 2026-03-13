@@ -1,0 +1,24 @@
+## Terraform (state / local artifacts)
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform/
+
+## Local secrets/config
+.env
+.env.*
+
+## OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+## Python build artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyd
+**/*.pyo
+
+## obs-agent build outputs / vendored packages
+obs-agent/dist/
+obs-agent/package/

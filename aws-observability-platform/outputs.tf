@@ -33,14 +33,9 @@ output "opensearch_dashboard_url" {
   value       = "https://${aws_opensearch_domain.main.endpoint}/_dashboards"
 }
 
-output "osis_logs_endpoint" {
-  description = "OSIS 로그 파이프라인 수신 엔드포인트"
-  value       = tolist(aws_osis_pipeline.logs.ingest_endpoint_urls)[0]
-}
-
-output "osis_traces_endpoint" {
-  description = "OSIS 트레이스 파이프라인 수신 엔드포인트"
-  value       = tolist(aws_osis_pipeline.traces.ingest_endpoint_urls)[0]
+output "otel_collector_role_arn" {
+  description = "OTel Collector EC2 IAM Role ARN (OpenSearch 직접 쓰기용 - SigV4)"
+  value       = aws_iam_role.otel_collector.arn
 }
 
 output "s3_logs_backup_bucket" {

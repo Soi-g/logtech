@@ -1,0 +1,26 @@
+{
+  "functions": [
+    {
+      "name": "QueryServiceErrors",
+      "description": "Get recent error and latency metrics plus error log samples for a service",
+      "parameters": {
+        "service": {
+          "description": "Target service name (e.g. springboot, thymeleaf, flask)",
+          "type": "string",
+          "required": true
+        },
+        "environment": {
+          "description": "Deployment environment (e.g. dev, staging, prod)",
+          "type": "string",
+          "required": false
+        },
+        "lastMinutes": {
+          "description": "Relative time window in minutes (e.g. 15, 30, 60)",
+          "type": "string",
+          "required": false
+        }
+      }
+    }
+  ]
+}
+

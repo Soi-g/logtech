@@ -1,5 +1,7 @@
 # AWS Observability Platform with Bedrock
-# Architecture: External OTel App → EC2 OTel Collector → AMP / OpenSearch Ingestion / S3
+# Architecture: External OTel App (Cognito JWT) → Envoy → EC2 OTel Collector
+#               → metrics: AMP / logs: OpenSearch(direct) / traces: OpenSearch(direct) / backup: S3
+# Note: OSIS 제거 - OTel Collector가 opensearch exporter로 직접 전송 (SigV4)
 
 terraform {
   required_version = ">= 1.0"
@@ -133,6 +135,30 @@ resource "aws_security_group" "otel_collector" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "Grafana"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Dev ports (3001, 8081-8084)"
+    from_port   = 3001
+    to_port     = 3001
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Dev ports (3001, 8081-8084)"
+    from_port   = 8081
+    to_port     = 8084
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -206,12 +232,13 @@ resource "aws_iam_role_policy" "otel_collector" {
         ]
       },
       {
-        Sid    = "OSISIngest"
+        # OSIS 제거 → OTel Collector가 OpenSearch에 직접 쓰기 (SigV4)
+        Sid    = "OpenSearchWrite"
         Effect = "Allow"
-        Action = ["osis:Ingest"]
+        Action = ["es:ESHttpPost", "es:ESHttpPut", "es:ESHttpGet", "es:ESHttp*"]
         Resource = [
-          aws_osis_pipeline.logs.pipeline_arn,
-          aws_osis_pipeline.traces.pipeline_arn
+          aws_opensearch_domain.main.arn,
+          "${aws_opensearch_domain.main.arn}/*"
         ]
       },
       {
@@ -228,43 +255,6 @@ resource "aws_iam_instance_profile" "otel_collector" {
   name = "${var.project_name}-otel-collector-profile"
   role = aws_iam_role.otel_collector.name
 }
-
-# ============================================================
-# IAM - OpenSearch Ingestion Pipeline
-# ============================================================
-
-resource "aws_iam_role" "osis_pipeline" {
-  name = "${var.project_name}-osis-pipeline-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "osis-pipelines.amazonaws.com" }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "osis_pipeline" {
-  name = "${var.project_name}-osis-pipeline-policy"
-  role = aws_iam_role.osis_pipeline.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = ["es:DescribeDomain", "es:ESHttp*"]
-        Resource = [
-          aws_opensearch_domain.main.arn,
-          "${aws_opensearch_domain.main.arn}/*"
-        ]
-      }
-    ]
-  })
-}
-
 
 # ============================================================
 # IAM - Bedrock Agent
@@ -336,12 +326,10 @@ resource "aws_instance" "otel_collector" {
     volume_type = "gp3"
   }
 
-  user_data = templatefile("${path.module}/user_data.sh", {
+  user_data_base64 = base64gzip(templatefile("${path.module}/user_data.sh", {
     amp_remote_write_url       = aws_prometheus_workspace.main.prometheus_endpoint
     amp_workspace_id           = aws_prometheus_workspace.main.id
     aws_region                 = var.aws_region
-    osis_logs_endpoint         = tolist(aws_osis_pipeline.logs.ingest_endpoint_urls)[0]
-    osis_traces_endpoint       = tolist(aws_osis_pipeline.traces.ingest_endpoint_urls)[0]
     s3_logs_bucket             = aws_s3_bucket.logs_backup.id
     s3_traces_bucket           = aws_s3_bucket.traces_backup.id
     s3_metrics_bucket          = aws_s3_bucket.metrics_backup.id
@@ -351,15 +339,14 @@ resource "aws_instance" "otel_collector" {
     opensearch_endpoint        = aws_opensearch_domain.main.endpoint
     opensearch_master_user     = var.opensearch_master_user
     opensearch_master_password = var.opensearch_master_password
-    osis_role_arn              = aws_iam_role.osis_pipeline.arn
-  })
+    # OSIS 제거 → OTel Collector IAM role이 직접 OpenSearch에 쓰기
+    otel_collector_role_arn = aws_iam_role.otel_collector.arn
+  }))
   tags = { Name = "${var.project_name}-otel-collector" }
 
   depends_on = [
     aws_prometheus_workspace.main,
     aws_opensearch_domain.main,
-    aws_osis_pipeline.logs,
-    aws_osis_pipeline.traces,
     aws_s3_bucket.logs_backup,
     aws_s3_bucket.traces_backup,
     aws_s3_bucket.metrics_backup,
@@ -380,6 +367,13 @@ resource "aws_eip" "otel_collector" {
 resource "aws_prometheus_workspace" "main" {
   alias = "${var.project_name}-amp"
   tags  = { Name = "${var.project_name}-amp" }
+}
+
+# Prometheus 기록 규칙 (v2에서 이식 - app/infra/jvm derived metrics)
+resource "aws_prometheus_rule_group_namespace" "derived_metrics" {
+  name         = "derived-metrics"
+  workspace_id = aws_prometheus_workspace.main.id
+  data         = file("${path.module}/prometheus-rules.yaml")
 }
 
 # ============================================================
@@ -493,93 +487,7 @@ resource "aws_opensearch_domain" "main" {
 }
 
 # rolesmapping은 user_data.sh에서 EC2 부팅 시 자동 실행됨
-# ============================================================
-# OpenSearch Ingestion Pipelines (OSIS)
-# VPC 연결로 OpenSearch VPC 도메인에 안전하게 접근
-# ============================================================
-
-resource "aws_osis_pipeline" "logs" {
-  pipeline_name = "${var.project_name}-logs"
-
-  vpc_options {
-    subnet_ids         = [aws_subnet.private.id]
-    security_group_ids = [aws_security_group.opensearch.id]
-  }
-
-  pipeline_configuration_body = <<-YAML
-    version: "2"
-    log-pipeline:
-      source:
-        otel_logs_source:
-          path: "/v1/logs"
-      processor:
-        - add_entries:
-            entries:
-              - key: "pipeline_name"
-                value: "logs"
-      sink:
-        - opensearch:
-            hosts: ["https://${aws_opensearch_domain.main.endpoint}"]
-            index: "logs-%%{yyyy.MM.dd}"
-            aws:
-              sts_role_arn: "${aws_iam_role.osis_pipeline.arn}"
-              region: "${var.aws_region}"
-              serverless: false
-  YAML
-
-  min_units  = 1
-  max_units  = 4
-  tags       = { Name = "${var.project_name}-logs-pipeline" }
-  depends_on = [aws_opensearch_domain.main]
-}
-
-resource "aws_osis_pipeline" "traces" {
-  pipeline_name = "${var.project_name}-traces"
-
-  vpc_options {
-    subnet_ids         = [aws_subnet.private.id]
-    security_group_ids = [aws_security_group.opensearch.id]
-  }
-
-  pipeline_configuration_body = <<-YAML
-    version: "2"
-    entry-pipeline:
-      source:
-        otel_trace_source:
-          path: "/v1/traces"
-      processor:
-        - otel_traces:
-      sink:
-        - opensearch:
-            hosts: ["https://${aws_opensearch_domain.main.endpoint}"]
-            index_type: trace-analytics-raw
-            aws:
-              sts_role_arn: "${aws_iam_role.osis_pipeline.arn}"
-              region: "${var.aws_region}"
-              serverless: false
-        - pipeline:
-            name: "service-map-pipeline"
-    service-map-pipeline:
-      source:
-        pipeline:
-          name: "entry-pipeline"
-      processor:
-        - service_map:
-      sink:
-        - opensearch:
-            hosts: ["https://${aws_opensearch_domain.main.endpoint}"]
-            index_type: trace-analytics-service-map
-            aws:
-              sts_role_arn: "${aws_iam_role.osis_pipeline.arn}"
-              region: "${var.aws_region}"
-              serverless: false
-  YAML
-
-  min_units  = 1
-  max_units  = 4
-  tags       = { Name = "${var.project_name}-traces-pipeline" }
-  depends_on = [aws_opensearch_domain.main]
-}
+# (OTel Collector IAM role → OpenSearch all_access 매핑)
 
 # ============================================================
 # Glue Database + Crawler (S3 → Athena 장기 분석)
