@@ -1,0 +1,225 @@
+receivers:
+  # for java,python sdk otlp
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+  # for containers
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+
+  # for host VM system
+  hostmetrics:
+    root_path: /host
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      network:
+      filesystem:
+        exclude_fs_types:
+          match_type: strict
+          fs_types:
+            - tmpfs
+            - devtmpfs
+            - overlay
+            - squashfs
+            - proc
+            - sysfs
+            - cgroup
+            - cgroup2
+            - nsfs
+        exclude_mount_points:
+          match_type: regexp
+          mount_points:
+            - ^/proc.*
+            - ^/sys.*
+            - ^/dev.*
+            - ^/run.*
+            - ^/var/lib/docker/.*
+            - ^/var/lib/containerd/.*
+            - ^/var/lib/kubelet/.*
+
+  filelog:
+    include:
+      - /host/var/log/syslog
+      - /host/var/log/auth.log
+    start_at: end
+    storage: file_storage
+    fingerprint_size: 1kb
+
+    operators:
+      - type: regex_parser
+        regex: '^(?P<ts>[A-Z][a-z]{2}\s+\d+\s+\d+:\d+:\d+)\s+(?P<hostname>\S+)\s+(?P<proc>[^\[:]+)(\[(?P<pid>\d+)\])?:\s+(?P<msg>.*)$'
+
+      - type: regex_parser
+        parse_from: attributes.msg
+        regex: '^(?P<kube_severity>[IWEF])\d{4}\s+.*$'
+        if: 'attributes.proc == "kubelet"'
+
+      - type: severity_parser
+        parse_from: attributes.kube_severity
+        preset: none
+        overwrite_text: true
+        mapping:
+          info: I
+          warn: W
+          error: E
+          fatal: F
+        if: "attributes.kube_severity != nil"
+
+      - type: move
+        from: attributes.msg
+        to: body
+
+      - type: move
+        from: attributes.hostname
+        to: resource["host.name"]
+
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
+    create_directory: true
+
+  oauth2client:
+    client_id: ${env:COGNITO_CLIENT_ID}
+    client_secret: ${env:COGNITO_CLIENT_SECRET}
+    token_url: ${env:COGNITO_TOKEN_URL}
+    scopes:
+      - ${env:COGNITO_SCOPE}
+
+exporters:
+  debug:
+    verbosity: basic
+
+  otlp/gateway:
+    endpoint: ${env:AWS_OTLP_GRPC_ENDPOINT}
+    tls:
+      insecure_skip_verify: true
+    auth:
+      authenticator: oauth2client
+    timeout: 30s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 2048
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+  # app(Java/Python SDK via OTLP)
+  resource/app:
+    attributes:
+      - key: service.namespace
+        value: "todolist"
+        action: upsert
+      - key: deployment.environment
+        value: "dev"
+        action: upsert
+      - key: source
+        value: "app"
+        action: upsert
+
+  # traces도 app 성격으로 동일 정규화
+  resource/traces:
+    attributes:
+      - key: service.namespace
+        value: "todolist"
+        action: upsert
+      - key: deployment.environment
+        value: "dev"
+        action: upsert
+      - key: source
+        value: "app"
+        action: upsert
+
+  # container metrics
+  resource/container:
+    attributes:
+      - key: service.namespace
+        value: "todolist"
+        action: upsert
+      - key: deployment.environment
+        value: "dev"
+        action: upsert
+      - key: source
+        value: "container"
+        action: upsert
+
+  # host metrics
+  resource/host:
+    attributes:
+      - key: service.namespace
+        value: "todolist"
+        action: upsert
+      - key: deployment.environment
+        value: "dev"
+        action: upsert
+      - key: source
+        value: "host"
+        action: upsert
+
+  # syslog / auth.log
+  resource/syslog:
+    attributes:
+      - key: service.namespace
+        value: "todolist"
+        action: upsert
+      - key: deployment.environment
+        value: "dev"
+        action: upsert
+      - key: source
+        value: "sys"
+        action: upsert
+      - key: log.source
+        value: "syslog"
+        action: upsert
+      - key: service.name
+        value: "host-logs"
+        action: insert
+
+service:
+  extensions: [file_storage, oauth2client]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/traces, batch]
+      exporters: [otlp/gateway]
+
+    metrics/app:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/app, batch]
+      exporters: [otlp/gateway]
+
+    metrics/container:
+      receivers: [docker_stats]
+      processors: [memory_limiter, resource/container, batch]
+      exporters: [otlp/gateway]
+
+    metrics/host:
+      receivers: [hostmetrics]
+      processors: [memory_limiter, resource/host, batch]
+      exporters: [otlp/gateway]
+
+    logs/app:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/app, batch]
+      exporters: [otlp/gateway]
+
+    logs/host:
+      receivers: [filelog]
+      processors: [memory_limiter, resource/syslog, batch]
+      exporters: [otlp/gateway]
