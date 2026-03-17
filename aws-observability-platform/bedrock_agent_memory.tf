@@ -3,212 +3,45 @@
 # ============================================================
 
 # ============================================================
-# OpenSearch Serverless - 장애 이력 저장 (장기 메모리)
-#
-# ⚠️ 배포 순서:
-# 1. terraform apply (AOSS 컬렉션 생성)
-# 2. Dev Tools에서 인덱스 수동 생성 (아래 가이드 참조)
-#
-# 📋 인덱스 생성 가이드:
-# AWS Console → OpenSearch Serverless → Collections
-# → log-platform-dev-incident-memory → OpenSearch Dashboards URL 클릭
-# → Dev Tools에서 아래 명령어 실행:
-#
-# PUT /incident-memory-index
-# {
-#   "settings": {
-#     "index": {"knn": true, "knn.algo_param.ef_search": 512}
-#   },
-#   "mappings": {
-#     "properties": {
-#       "incident_id": {"type": "keyword"},
-#       "alert_name": {"type": "keyword"},
-#       "timestamp": {"type": "date"},
-#       "severity": {"type": "keyword"},
-#       "status": {"type": "keyword"},
-#       "resolved_at": {"type": "date"},
-#       "root_cause": {"type": "text", "analyzer": "standard"},
-#       "resolution": {"type": "text", "analyzer": "standard"},
-#       "resolution_time_minutes": {"type": "float"},
-#       "metrics": {
-#         "properties": {
-#           "session_id": {"type": "keyword"},
-#           "is_recurring": {"type": "boolean"},
-#           "past_occurrences": {"type": "integer"},
-#           "jvm_memory_used": {"type": "float"},
-#           "cpu_usage": {"type": "float"},
-#           "http_error_rate": {"type": "float"}
-#         }
-#       },
-#       "log_pattern_vector": {
-#         "type": "knn_vector",
-#         "dimension": 1024,
-#         "method": {
-#           "engine": "faiss",
-#           "name": "hnsw",
-#           "space_type": "l2",
-#           "parameters": {"ef_construction": 512, "m": 16}
-#         }
-#       },
-#       "error_messages": {"type": "text", "analyzer": "standard"},
-#       "tags": {"type": "keyword"}
-#     }
-#   }
-# }
-
-# PUT /bedrock-knowledge-base-default-index
-# {
-#   "settings": {
-#     "index": {
-#       "knn": true,
-#       "knn.algo_param.ef_search": 512
-#     }
-#   },
-#   "mappings": {
-#     "properties": {
-#       "AMAZON_BEDROCK_METADATA": {"type": "text", "index": false},
-#       "AMAZON_BEDROCK_TEXT_CHUNK": {"type": "text"},
-#       "bedrock-knowledge-base-default-vector": {
-#         "type": "knn_vector",
-#         "dimension": 1024,
-#         "method": {
-#           "engine": "faiss",
-#           "name": "hnsw",
-#           "space_type": "l2",
-#           "parameters": {"ef_construction": 512, "m": 16}
-#         }
-#       }
-#     }
-#   }
-# }
-
+# DynamoDB - ongoing 인시던트 상태 추적 (Phase 4: AOSS 대체)
 # ============================================================
 
-# 장애 이력용 AOSS 컬렉션 (런북과 분리)
-resource "aws_opensearchserverless_collection" "incident_memory" {
-  name        = "${var.project_name}-incident-memory"
-  type        = "VECTORSEARCH"
-  description = "장애 이력 벡터 검색 컬렉션"
+resource "aws_dynamodb_table" "incident_ongoing" {
+  name         = "${var.project_name}-incident-ongoing"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "alert_name"
 
-  depends_on = [
-    aws_opensearchserverless_security_policy.incident_memory_encryption,
-    aws_opensearchserverless_security_policy.incident_memory_network
-  ]
-
-  tags = {
-    Name = "${var.project_name}-incident-memory"
+  attribute {
+    name = "alert_name"
+    type = "S"
   }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = { Name = "${var.project_name}-incident-ongoing" }
 }
 
-# 암호화 정책
-resource "aws_opensearchserverless_security_policy" "incident_memory_encryption" {
-  name = "${var.project_name}-incident-enc"
-  type = "encryption"
+resource "aws_iam_role_policy" "lambda_dynamodb_incident" {
+  name = "${var.project_name}-lambda-dynamodb-incident-policy"
+  role = aws_iam_role.lambda_agent.id
+
   policy = jsonencode({
-    Rules = [
-      {
-        ResourceType = "collection"
-        Resource     = ["collection/${var.project_name}-incident-memory"]
-      }
-    ]
-    AWSOwnedKey = true
-  })
-}
-
-# 네트워크 정책
-resource "aws_opensearchserverless_security_policy" "incident_memory_network" {
-  name = "${var.project_name}-incident-net"
-  type = "network"
-  policy = jsonencode([
-    {
-      Rules = [
-        {
-          ResourceType = "collection"
-          Resource     = ["collection/${var.project_name}-incident-memory"]
-        },
-        {
-          ResourceType = "dashboard"
-          Resource     = ["collection/${var.project_name}-incident-memory"]
-        }
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "DynamoDBIncidentOngoing"
+      Effect = "Allow"
+      Action = [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:UpdateItem",
       ]
-      AllowFromPublic = true
-    }
-  ])
-}
-
-# 데이터 접근 정책
-resource "aws_opensearchserverless_access_policy" "incident_memory" {
-  name = "${var.project_name}-incident-access"
-  type = "data"
-  policy = jsonencode([{
-    Rules = [
-      {
-        ResourceType = "index"
-        Resource     = ["index/${var.project_name}-incident-memory/*"]
-        Permission   = ["aoss:*"]
-      },
-      {
-        ResourceType = "collection"
-        Resource     = ["collection/${var.project_name}-incident-memory"]
-        Permission   = ["aoss:*"]
-      }
-    ]
-    Principal = [
-      aws_iam_role.lambda_agent.arn,
-      aws_iam_role.bedrock_agent.arn,
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/admin"
-    ]
-  }])
-
-  depends_on = [aws_opensearchserverless_collection.incident_memory]
-}
-
-# 인덱스 생성 Lambda
-resource "aws_lambda_function" "incident_memory_index_creator" {
-  function_name = "${var.project_name}-incident-memory-index-creator"
-  role          = aws_iam_role.lambda_agent.arn
-  handler       = "incident_memory_index_creator.handler"
-  runtime       = "python3.12"
-  timeout       = 60
-  memory_size   = 256
-  layers        = [aws_lambda_layer_version.agent_deps.arn]
-
-  filename         = data.archive_file.lambda_agent.output_path
-  source_code_hash = data.archive_file.lambda_agent.output_base64sha256
-
-  environment {
-    variables = {
-      AOSS_ENDPOINT   = aws_opensearchserverless_collection.incident_memory.collection_endpoint
-      AWS_REGION_NAME = var.aws_region
-    }
-  }
-
-  tags = { Name = "${var.project_name}-incident-memory-index-creator" }
-}
-
-# 인덱스 수동 생성 필요
-# terraform apply 완료 후 아래 명령어 실행:
-# aws lambda invoke --function-name log-platform-dev-incident-memory-index-creator --region ap-northeast-2 --payload file://scripts/incident_memory_payload.json incident_memory_response.json
-
-resource "null_resource" "create_incident_memory_index" {
-  provisioner "local-exec" {
-    command = <<-EOT
-      echo '{"endpoint": "${replace(aws_opensearchserverless_collection.incident_memory.collection_endpoint, "https://", "")}", "region": "${var.aws_region}", "index_name": "incident-memory-index"}' > ${path.module}/scripts/incident_memory_payload_generated.json
-      aws lambda invoke --function-name ${aws_lambda_function.incident_memory_index_creator.function_name} --region ${var.aws_region} --cli-binary-format raw-in-base64-out --payload file://${path.module}/scripts/incident_memory_payload_generated.json ${path.module}/incident_memory_response.json
-    EOT
-  }
-
-  triggers = {
-    collection_endpoint = aws_opensearchserverless_collection.incident_memory.collection_endpoint
-    lambda_hash         = aws_lambda_function.incident_memory_index_creator.source_code_hash
-  }
-
-  depends_on = [
-    aws_opensearchserverless_collection.incident_memory,
-    aws_opensearchserverless_access_policy.incident_memory,
-    aws_lambda_function.incident_memory_index_creator
-  ]
+      Resource = aws_dynamodb_table.incident_ongoing.arn
+    }]
+  })
 }
 
 # ============================================================
@@ -295,7 +128,7 @@ resource "aws_bedrockagent_agent_knowledge_base_association" "runbooks" {
 }
 
 # ============================================================
-# IAM - AOSS 접근 권한
+# IAM - AOSS 접근 권한 (runbooks만 유지, incident_memory 제거)
 # ============================================================
 resource "aws_iam_role_policy" "lambda_aoss_incident_memory" {
   name = "${var.project_name}-lambda-aoss-incident-memory-policy"
@@ -304,14 +137,6 @@ resource "aws_iam_role_policy" "lambda_aoss_incident_memory" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Sid    = "AOSSIncidentMemoryAccess"
-        Effect = "Allow"
-        Action = [
-          "aoss:APIAccessAll"
-        ]
-        Resource = aws_opensearchserverless_collection.incident_memory.arn
-      },
       {
         Sid    = "AOSSRunbooksAccess"
         Effect = "Allow"
@@ -344,59 +169,6 @@ resource "aws_iam_role_policy" "lambda_aoss_incident_memory" {
 }
 
 # ============================================================
-# Lambda - Bedrock Agent Runtime 호출 (SNS 트리거)
-# ============================================================
-resource "aws_lambda_function" "agent_runtime" {
-  function_name = "${var.project_name}-agent-runtime"
-  role          = aws_iam_role.lambda_agent.arn
-  handler       = "bedrock_agent_runtime_handler.lambda_handler"
-  runtime       = "python3.12"
-  timeout       = 120
-  memory_size   = 512
-  layers        = [aws_lambda_layer_version.agent_deps.arn]
-
-  filename         = data.archive_file.lambda_agent.output_path
-  source_code_hash = data.archive_file.lambda_agent.output_base64sha256
-
-  environment {
-    variables = {
-      BEDROCK_AGENT_ID              = aws_bedrockagent_agent.observability.id
-      BEDROCK_AGENT_ALIAS_ID        = aws_bedrockagent_agent_alias.prod.agent_alias_id
-      AOSS_INCIDENT_MEMORY_ENDPOINT = aws_opensearchserverless_collection.incident_memory.collection_endpoint
-      SLACK_BOT_TOKEN               = var.slack_bot_token
-      SLACK_CHANNEL                 = var.slack_channel
-      AWS_REGION_NAME               = var.aws_region
-    }
-  }
-
-  tags = { Name = "${var.project_name}-agent-runtime" }
-}
-
-resource "aws_iam_role_policy" "lambda_bedrock_agent_runtime" {
-  name = "${var.project_name}-lambda-bedrock-agent-runtime-policy"
-  role = aws_iam_role.lambda_agent.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "BedrockAgentRuntime"
-        Effect = "Allow"
-        Action = [
-          "bedrock:InvokeAgent",
-          "bedrock:Retrieve",
-          "bedrock:RetrieveAndGenerate"
-        ]
-        Resource = [
-          aws_bedrockagent_agent.observability.agent_arn,
-          "${aws_bedrockagent_agent.observability.agent_arn}/*"
-        ]
-      }
-    ]
-  })
-}
-
-# ============================================================
 # Outputs
 # ============================================================
 output "bedrock_agent_id" {
@@ -409,7 +181,7 @@ output "bedrock_agent_alias_id" {
   description = "Bedrock Agent Alias ID (prod)"
 }
 
-output "incident_memory_endpoint" {
-  value       = aws_opensearchserverless_collection.incident_memory.collection_endpoint
-  description = "OpenSearch Serverless 장애 이력 엔드포인트"
+output "dynamodb_incident_table" {
+  value       = aws_dynamodb_table.incident_ongoing.name
+  description = "DynamoDB ongoing 인시던트 추적 테이블"
 }
