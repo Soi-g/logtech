@@ -25,13 +25,13 @@ variable "ec2_ami_id" {
 variable "ec2_key_name" {
   description = "EC2 Key Pair name for SSH access"
   type        = string
-  default     = "log-platform-key-v4"
+  default     = "log-platform-key-v5"
 }
 
 variable "ec2_key_path" {
   description = "Local path to EC2 private key file for SSH (used by null_resource provisioner)"
   type        = string
-  default     = "C:\\Users\\DS8\\Downloads\\aws-observability-platform\\log-platform-key-v4.pem"
+  default     = "C:\\Users\\DS8\\Downloads\\aws-observability-platform_all\\aws-observability-platform\\log-platform-key-v5.pem"
 }
 
 variable "opensearch_master_user" {

@@ -120,9 +120,17 @@ resource "aws_security_group" "otel_collector" {
   }
 
   ingress {
-    description = "OTLP gRPC - from external OTel Collector"
+    description = "OTLP gRPC - from external OTel Collector (via Envoy JWT auth)"
     from_port   = 4317
     to_port     = 4317
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "OTLP gRPC direct - from trusted OTel Agents (bypass Envoy)"
+    from_port   = 14317
+    to_port     = 14317
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -155,6 +163,14 @@ resource "aws_security_group" "otel_collector" {
     description = "Dev ports (3001, 8081-8084)"
     from_port   = 8081
     to_port     = 8084
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Chatbot"
+    from_port   = 8000
+    to_port     = 8000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -216,9 +232,9 @@ resource "aws_iam_role_policy" "otel_collector" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "AMPWrite"
-        Effect   = "Allow"
-        Action   = ["aps:RemoteWrite", "aps:QueryMetrics", "aps:GetSeries", "aps:GetLabels", "aps:GetMetricMetadata"]
+        Sid    = "AMPAccess"
+        Effect = "Allow"
+        Action = ["aps:RemoteWrite", "aps:QueryMetrics", "aps:GetSeries", "aps:GetLabels", "aps:GetMetricMetadata"]
         Resource = "*"
       },
       {
@@ -232,19 +248,115 @@ resource "aws_iam_role_policy" "otel_collector" {
         ]
       },
       {
-        # OSIS 제거 → OTel Collector가 OpenSearch에 직접 쓰기 (SigV4)
-        Sid    = "OpenSearchWrite"
+        Sid    = "S3AthenaAccess"
         Effect = "Allow"
-        Action = ["es:ESHttpPost", "es:ESHttpPut", "es:ESHttpGet", "es:ESHttp*"]
+        Action = ["s3:GetObject", "s3:ListBucket", "s3:PutObject", "s3:GetBucketLocation"]
+        Resource = [
+          "${aws_s3_bucket.athena_results.arn}",
+          "${aws_s3_bucket.athena_results.arn}/*",
+          "${aws_s3_bucket.logs_backup.arn}",
+          "${aws_s3_bucket.logs_backup.arn}/*",
+          "${aws_s3_bucket.traces_backup.arn}",
+          "${aws_s3_bucket.traces_backup.arn}/*"
+        ]
+      },
+      {
+        Sid    = "OpenSearchAccess"
+        Effect = "Allow"
+        Action = ["es:ESHttp*"]
         Resource = [
           aws_opensearch_domain.main.arn,
           "${aws_opensearch_domain.main.arn}/*"
         ]
       },
       {
-        Sid      = "CloudWatch"
-        Effect   = "Allow"
-        Action   = ["cloudwatch:PutMetricData"]
+        Sid    = "CloudWatchAccess"
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutMetricData",
+          "cloudwatch:GetMetricData",
+          "cloudwatch:GetMetricStatistics",
+          "cloudwatch:ListMetrics",
+          "cloudwatch:DescribeAlarms",
+          "logs:FilterLogEvents",
+          "logs:GetLogEvents",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "EC2Access"
+        Effect = "Allow"
+        Action = ["ec2:DescribeInstances", "ec2:DescribeInstanceStatus"]
+        Resource = "*"
+      },
+      {
+        Sid    = "RDSAccess"
+        Effect = "Allow"
+        Action = ["rds:DescribeDBInstances", "rds:DescribeDBClusters"]
+        Resource = "*"
+      },
+      {
+        Sid    = "ELBAccess"
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:DescribeLoadBalancers",
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTargetHealth"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "AutoScalingAccess"
+        Effect = "Allow"
+        Action = ["autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeScalingActivities"]
+        Resource = "*"
+      },
+      {
+        Sid    = "CloudTrailAccess"
+        Effect = "Allow"
+        Action = ["cloudtrail:LookupEvents"]
+        Resource = "*"
+      },
+      {
+        Sid    = "DynamoDBAccess"
+        Effect = "Allow"
+        Action = ["dynamodb:Scan", "dynamodb:GetItem", "dynamodb:Query"]
+        Resource = "arn:aws:dynamodb:${var.aws_region}:*:table/${var.project_name}-*"
+      },
+      {
+        Sid    = "BedrockAccess"
+        Effect = "Allow"
+        Action = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+        Resource = "*"
+      },
+      {
+        Sid    = "BedrockAgentCoreAccess"
+        Effect = "Allow"
+        Action = [
+          "bedrock-agent-runtime:RetrieveAndGenerate",
+          "bedrock-agent-runtime:InvokeAgent",
+          "bedrock-agent-runtime:Retrieve"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "AthenaAccess"
+        Effect = "Allow"
+        Action = [
+          "athena:StartQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:StopQueryExecution",
+          "athena:ListQueryExecutions"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "GlueAccess"
+        Effect = "Allow"
+        Action = ["glue:GetTable", "glue:GetTables", "glue:GetDatabase", "glue:GetPartitions"]
         Resource = "*"
       }
     ]
@@ -334,13 +446,17 @@ resource "aws_instance" "otel_collector" {
     s3_traces_bucket           = aws_s3_bucket.traces_backup.id
     s3_metrics_bucket          = aws_s3_bucket.metrics_backup.id
     project_name               = var.project_name
+    project_name_underscore    = replace(var.project_name, "-", "_")
     cognito_user_pool_id       = aws_cognito_user_pool.otel_auth.id
     cognito_client_id          = aws_cognito_user_pool_client.otel_customer.id
     opensearch_endpoint        = aws_opensearch_domain.main.endpoint
     opensearch_master_user     = var.opensearch_master_user
     opensearch_master_password = var.opensearch_master_password
-    # OSIS 제거 → OTel Collector IAM role이 직접 OpenSearch에 쓰기
-    otel_collector_role_arn = aws_iam_role.otel_collector.arn
+    otel_collector_role_arn    = aws_iam_role.otel_collector.arn
+    agentcore_memory_id        = var.agentcore_memory_id
+    athena_results_bucket      = aws_s3_bucket.athena_results.id
+    logs_bucket                = aws_s3_bucket.logs_backup.id
+    traces_bucket              = aws_s3_bucket.traces_backup.id
   }))
   tags = { Name = "${var.project_name}-otel-collector" }
 
@@ -350,6 +466,7 @@ resource "aws_instance" "otel_collector" {
     aws_s3_bucket.logs_backup,
     aws_s3_bucket.traces_backup,
     aws_s3_bucket.metrics_backup,
+    aws_s3_bucket.athena_results,
   ]
 }
 
@@ -534,40 +651,144 @@ resource "aws_iam_role_policy" "glue_s3" {
   })
 }
 
-resource "aws_glue_crawler" "logs" {
-  name          = "${var.project_name}-logs-crawler"
+resource "aws_glue_catalog_table" "otel_logs" {
+  name          = "otel_logs"
   database_name = aws_glue_catalog_database.observability.name
-  role          = aws_iam_role.glue_crawler.arn
-  schedule      = "cron(0 2 * * ? *)" # 매일 새벽 2시 실행
+  table_type    = "EXTERNAL_TABLE"
 
-  s3_target {
-    path = "s3://${aws_s3_bucket.logs_backup.id}/logs/"
+  parameters = {
+    "classification"                    = "json"
+    "projection.enabled"                = "true"
+    "projection.year.type"              = "integer"
+    "projection.year.range"             = "2024,2030"
+    "projection.year.digits"            = "4"
+    "projection.month.type"             = "integer"
+    "projection.month.range"            = "1,12"
+    "projection.month.digits"           = "2"
+    "projection.day.type"               = "integer"
+    "projection.day.range"              = "1,31"
+    "projection.day.digits"             = "2"
+    "projection.hour.type"              = "integer"
+    "projection.hour.range"             = "0,23"
+    "projection.hour.digits"            = "2"
+    "projection.minute.type"            = "integer"
+    "projection.minute.range"           = "0,59"
+    "projection.minute.digits"          = "2"
+    "storage.location.template"         = "s3://${aws_s3_bucket.logs_backup.id}/telemetry/raw/logs/year=$${year}/month=$${month}/day=$${day}/hour=$${hour}/minute=$${minute}"
   }
 
-  schema_change_policy {
-    update_behavior = "UPDATE_IN_DATABASE"
-    delete_behavior = "LOG"
+  storage_descriptor {
+    location      = "s3://${aws_s3_bucket.logs_backup.id}/telemetry/raw/logs/"
+    input_format  = "org.apache.hadoop.mapred.TextInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+    compressed    = true
+
+    ser_de_info {
+      serialization_library = "org.openx.data.jsonserde.JsonSerDe"
+      parameters = {
+        "ignore.malformed.json" = "TRUE"
+        "dots.in.keys"          = "FALSE"
+        "case.insensitive"      = "TRUE"
+        "mapping"               = "TRUE"
+      }
+    }
+
+    columns {
+      name = "resourcelogs"
+      type = "array<struct<resource:struct<attributes:array<struct<key:string,value:struct<stringvalue:string,intvalue:string,boolvalue:boolean,doublevalue:double>>>>,scopelogs:array<struct<logrecords:array<struct<timeunixnano:string,observedtimeunixnano:string,severitytext:string,severitynumber:int,body:struct<stringvalue:string>,attributes:array<struct<key:string,value:struct<stringvalue:string,intvalue:string>>>,traceid:string,spanid:string>>>>>>"
+    }
   }
 
-  tags = { Name = "${var.project_name}-logs-crawler" }
+  partition_keys {
+    name = "year"
+    type = "string"
+  }
+  partition_keys {
+    name = "month"
+    type = "string"
+  }
+  partition_keys {
+    name = "day"
+    type = "string"
+  }
+  partition_keys {
+    name = "hour"
+    type = "string"
+  }
+  partition_keys {
+    name = "minute"
+    type = "string"
+  }
 }
 
-resource "aws_glue_crawler" "traces" {
-  name          = "${var.project_name}-traces-crawler"
+resource "aws_glue_catalog_table" "otel_traces" {
+  name          = "otel_traces"
   database_name = aws_glue_catalog_database.observability.name
-  role          = aws_iam_role.glue_crawler.arn
-  schedule      = "cron(0 2 * * ? *)" # 매일 새벽 2시 실행
+  table_type    = "EXTERNAL_TABLE"
 
-  s3_target {
-    path = "s3://${aws_s3_bucket.traces_backup.id}/traces/"
+  parameters = {
+    "classification"                    = "json"
+    "projection.enabled"                = "true"
+    "projection.year.type"              = "integer"
+    "projection.year.range"             = "2024,2030"
+    "projection.year.digits"            = "4"
+    "projection.month.type"             = "integer"
+    "projection.month.range"            = "1,12"
+    "projection.month.digits"           = "2"
+    "projection.day.type"               = "integer"
+    "projection.day.range"              = "1,31"
+    "projection.day.digits"             = "2"
+    "projection.hour.type"              = "integer"
+    "projection.hour.range"             = "0,23"
+    "projection.hour.digits"            = "2"
+    "projection.minute.type"            = "integer"
+    "projection.minute.range"           = "0,59"
+    "projection.minute.digits"          = "2"
+    "storage.location.template"         = "s3://${aws_s3_bucket.traces_backup.id}/telemetry/raw/traces/year=$${year}/month=$${month}/day=$${day}/hour=$${hour}/minute=$${minute}"
   }
 
-  schema_change_policy {
-    update_behavior = "UPDATE_IN_DATABASE"
-    delete_behavior = "LOG"
+  storage_descriptor {
+    location      = "s3://${aws_s3_bucket.traces_backup.id}/telemetry/raw/traces/"
+    input_format  = "org.apache.hadoop.mapred.TextInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+    compressed    = true
+
+    ser_de_info {
+      serialization_library = "org.openx.data.jsonserde.JsonSerDe"
+      parameters = {
+        "ignore.malformed.json" = "TRUE"
+        "dots.in.keys"          = "FALSE"
+        "case.insensitive"      = "TRUE"
+        "mapping"               = "TRUE"
+      }
+    }
+
+    columns {
+      name = "resourcespans"
+      type = "array<struct<resource:struct<attributes:array<struct<key:string,value:struct<stringvalue:string,intvalue:string,boolvalue:boolean,doublevalue:double>>>>,scopespans:array<struct<spans:array<struct<traceid:string,spanid:string,parentspanid:string,name:string,kind:int,starttimeunixnano:string,endtimeunixnano:string,attributes:array<struct<key:string,value:struct<stringvalue:string,intvalue:string>>>,status:struct<code:int,message:string>>>>>>>"
+    }
   }
 
-  tags = { Name = "${var.project_name}-traces-crawler" }
+  partition_keys {
+    name = "year"
+    type = "string"
+  }
+  partition_keys {
+    name = "month"
+    type = "string"
+  }
+  partition_keys {
+    name = "day"
+    type = "string"
+  }
+  partition_keys {
+    name = "hour"
+    type = "string"
+  }
+  partition_keys {
+    name = "minute"
+    type = "string"
+  }
 }
 
 resource "aws_glue_crawler" "metrics" {

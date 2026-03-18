@@ -119,13 +119,13 @@ resource "aws_bedrockagent_agent_alias" "prod" {
 # ⚠️ 1단계에서 주석 처리, 3단계에서 주석 해제
 # ============================================================
 
-resource "aws_bedrockagent_agent_knowledge_base_association" "runbooks" {
-  agent_id             = aws_bedrockagent_agent.observability.id
-  agent_version        = "DRAFT"
-  knowledge_base_id    = aws_bedrockagent_knowledge_base.runbooks.id
-  description          = "운영 런북 Knowledge Base"
-  knowledge_base_state = "ENABLED"
-}
+# resource "aws_bedrockagent_agent_knowledge_base_association" "runbooks" {
+#   agent_id             = aws_bedrockagent_agent.observability.id
+#   agent_version        = "DRAFT"
+#   knowledge_base_id    = aws_bedrockagent_knowledge_base.runbooks.id
+#   description          = "운영 런북 Knowledge Base"
+#   knowledge_base_state = "ENABLED"
+# }
 
 # ============================================================
 # IAM - AOSS 접근 권한 (runbooks만 유지, incident_memory 제거)
@@ -137,14 +137,12 @@ resource "aws_iam_role_policy" "lambda_aoss_incident_memory" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Sid    = "AOSSRunbooksAccess"
-        Effect = "Allow"
-        Action = [
-          "aoss:APIAccessAll"
-        ]
-        Resource = aws_opensearchserverless_collection.runbooks.arn
-      },
+      # {
+      #   Sid      = "AOSSRunbooksAccess"
+      #   Effect   = "Allow"
+      #   Action   = ["aoss:APIAccessAll"]
+      #   Resource = aws_opensearchserverless_collection.runbooks.arn
+      # },
       {
         Sid    = "BedrockEmbeddings"
         Effect = "Allow"

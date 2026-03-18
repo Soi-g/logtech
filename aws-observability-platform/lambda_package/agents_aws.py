@@ -34,10 +34,17 @@ from strands.models import BedrockModel
 # 환경변수
 # ============================================================
 AMP_ENDPOINT = os.environ.get("AMP_ENDPOINT", "")
+print(f"[agents_aws] loaded, AMP_ENDPOINT={AMP_ENDPOINT[:40] if AMP_ENDPOINT else 'NOT SET'}")
 OS_ENDPOINT  = os.environ.get("OPENSEARCH_ENDPOINT", "")
 OS_USER      = os.environ.get("OPENSEARCH_USER", "admin")
 OS_PASSWORD  = os.environ.get("OPENSEARCH_PASSWORD", "")
 AWS_REGION   = os.environ.get("AWS_REGION_NAME", "ap-northeast-2")
+
+# Athena 설정
+ATHENA_DB          = os.environ.get("ATHENA_DATABASE", "log_platform_dev_observability")
+ATHENA_OUTPUT      = os.environ.get("ATHENA_OUTPUT_BUCKET", "")  # s3://bucket/athena-results/
+LOGS_BUCKET        = os.environ.get("LOGS_BUCKET", "log-platform-dev-logs-backup-347751175815")
+TRACES_BUCKET      = os.environ.get("TRACES_BUCKET", "log-platform-dev-traces-backup-347751175815")
 
 
 # ============================================================
@@ -47,7 +54,8 @@ AMP_SCHEMA = """
 ## AMP(Prometheus) 메트릭 스키마
 
 ### 라벨 규칙
-- job 라벨 = service.name (예: job="springboot", job="flask", job="thymeleaf")
+- job 라벨 = service.name/service.namespace 조합 (예: job="todolist/springboot", job="todolist/todoui-flask", job="todolist/thymeleaf")
+- job="springboot" 단독은 존재하지 않음. 반드시 "todolist/springboot" 등 전체값 사용.
 - deployment_environment: "dev" = VM/Docker, "prod" = EC2/AWS
 - 반드시 job 라벨로 서비스를 필터할 것. service_name 라벨은 존재하지 않음.
 
@@ -156,7 +164,8 @@ def _trail(): return boto3.client("cloudtrail",   region_name=AWS_REGION)
 def fetch_amp_metric(promql: str, last_minutes: int = 0) -> str:
     """AMP(Amazon Managed Prometheus)에서 PromQL 쿼리로 메트릭 조회.
     last_minutes=0이면 instant query(현재값), >0이면 range query(시계열).
-    서비스 필터는 job 라벨 사용. 예: app_http_server_error_ratio_5m{job="springboot",deployment_environment="dev"}
+    서비스 필터는 job 라벨 사용. 예: app_http_server_error_ratio_5m{job="todolist/springboot",deployment_environment="dev"}
+    job 라벨은 반드시 전체값 사용 (job="todolist/springboot", job="todolist/thymeleaf", job="todolist/todoui-flask")
     """ + AMP_SCHEMA
     try:
         q = urllib.parse.quote(promql, safe="")
@@ -301,7 +310,7 @@ def fetch_cloudwatch_metric(
     metric_name 예시 (RDS): DatabaseConnections, CPUUtilization, FreeableMemory, ReadLatency, WriteLatency
     metric_name 예시 (EC2): CPUUtilization, StatusCheckFailed
     dimensions: JSON 문자열
-      RDS: '[{"Name":"DBInstanceIdentifier","Value":"logtech-dev-customer-postgres"}]'
+      RDS: '[{"Name":"DBInstanceIdentifier","Value":"log-platform-dev-customer-postgres"}]'
       EC2: '[{"Name":"InstanceId","Value":"i-0123456789abcdef0"}]'
     stat: Average | Maximum | Minimum | Sum
     """
@@ -334,7 +343,7 @@ def fetch_cloudwatch_metric(
 def fetch_cloudwatch_alarms(state: str = "ALARM", name_prefix: str = "") -> str:
     """현재 발생 중인 CloudWatch 알람 조회.
     state: "ALARM" | "OK" | "INSUFFICIENT_DATA" (기본값: "ALARM")
-    name_prefix: 알람 이름 필터 (예: "logtech-dev")
+    name_prefix: 알람 이름 필터 (예: "log-platform-dev")
     """
     try:
         kwargs: Dict[str, Any] = {"StateValue": state}
@@ -367,8 +376,8 @@ def fetch_cloudwatch_logs(
 ) -> str:
     """CloudWatch Logs에서 로그 이벤트 조회. RDS 에러 로그, Lambda 로그 등에 사용.
     log_group: CloudWatch 로그 그룹 이름
-      RDS 예시: "/aws/rds/instance/logtech-dev-customer-postgres/error"
-      Lambda 예시: "/aws/lambda/logtech-dev-observability-agent"
+      RDS 예시: "/aws/rds/instance/log-platform-dev-customer-postgres/error"
+      Lambda 예시: "/aws/lambda/log-platform-dev-observability-agent"
     filter_pattern: CloudWatch Logs 필터 패턴 (예: "ERROR", "Exception", "")
     """
     try:
@@ -510,7 +519,7 @@ def fetch_cloudtrail_events(
     last_minutes: int = 60,
 ) -> str:
     """CloudTrail에서 최근 API 변경 이력 조회. 누가 언제 무엇을 변경했는지 추적.
-    resource_name: 리소스 이름 (예: "logtech-dev-customer-postgres")
+    resource_name: 리소스 이름 (예: "log-platform-dev-customer-postgres")
     event_names: 쉼표 구분 API 이름 (예: "ModifyDBInstance,RebootDBInstance")
       SG 변경: "AuthorizeSecurityGroupIngress,RevokeSecurityGroupIngress"
       EC2 변경: "StopInstances,StartInstances,RebootInstances"
@@ -553,7 +562,7 @@ def fetch_cloudtrail_events(
 @tool
 def fetch_elb_health(load_balancer_name: str = "", target_group_name: str = "") -> str:
     """ALB/NLB target health 조회. 뒷단 EC2 인스턴스 health check 상태 확인.
-    load_balancer_name: LB 이름 일부 (예: "logtech-dev")
+    load_balancer_name: LB 이름 일부 (예: "log-platform-dev")
     target_group_name: target group 이름 일부 (예: "springboot")
     """
     try:
@@ -623,12 +632,13 @@ Data sources:
 1. AMP (OTel metrics) — fetch_amp_metric
    - App/container/host/JVM metrics from OTel collector
    - Environment label: deployment_environment="dev" (VM/Docker) or deployment_environment="prod" (EC2/AWS)
-   - Job label = service name: job="springboot", job="flask", job="thymeleaf"
+   - Job label = service name (전체값 사용): job="todolist/springboot", job="todolist/thymeleaf", job="todolist/todoui-flask"
+   - job="springboot" 단독은 AMP에 존재하지 않음. 반드시 "todolist/springboot" 등 전체값 사용.
    - 파생 메트릭 우선 사용 (app_http_server_error_ratio_5m 등), 없으면 raw 메트릭 시도
 
 2. CloudWatch — fetch_cloudwatch_metric
    - AWS 관리형 서비스 메트릭 (RDS, EC2)
-   - RDS: namespace="AWS/RDS", dimension DBInstanceIdentifier (예: "logtech-dev-customer-postgres")
+   - RDS: namespace="AWS/RDS", dimension DBInstanceIdentifier (예: "log-platform-dev-customer-postgres")
    - EC2: namespace="AWS/EC2", dimension InstanceId
 
 3. CloudWatch Alarms — fetch_cloudwatch_alarms
@@ -681,7 +691,7 @@ Tools:
 - fetch_cloudwatch_metric: CloudWatch 메트릭 (RDS CPU/connections 등)
 
 Customer stack (prod environment) resource naming:
-- RDS identifier: "logtech-dev-customer-postgres"
+- RDS identifier: "log-platform-dev-customer-postgres"
 - EC2 frontend Name tag: "*customer-frontend*"
 - EC2 backend Name tag: "*customer-backend*"
 
@@ -774,7 +784,7 @@ def logs_agent(query: str) -> str:
     - 앱 에러 로그: "springboot dev 환경 최근 10분 ERROR 로그 확인"
     - 트레이스: "springboot dev 최근 10분 에러 트레이스 확인"
     - RDS 에러 로그: "prod RDS 에러 로그 최근 30분 확인"
-    - Lambda 로그: "logtech-dev-observability-agent Lambda 로그 확인"
+    - Lambda 로그: "log-platform-dev-observability-agent Lambda 로그 확인"
 
     query에 포함할 내용: 서비스명, 환경(dev/prod), 시간 범위, 로그 레벨/키워드
     """
@@ -807,5 +817,429 @@ def infrastructure_agent(query: str) -> str:
         text = str(result)
         print(f"[SUB-AGENT] infrastructure_agent done len={len(text)}")
         return text[:4000]
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ============================================================
+# 챗봇 전용 툴
+# ============================================================
+
+@tool
+def search_incident_history(alert_name: str, query: str = "") -> str:
+    """과거 인시던트 이력을 AgentCore Memory에서 검색합니다.
+
+    사용 시나리오:
+    - "ServiceDown 알람 최근에 몇 번 났어?"
+    - "springboot 장애 원인이 주로 뭐야?"
+    - "이런 에러 전에도 있었나?"
+
+    Args:
+        alert_name: 알람 이름 (예: "ServiceDown", "HighHttpErrorRate")
+        query: 추가 검색 키워드 (선택)
+    """
+    try:
+        from agentcore_memory import AgentCoreMemoryClient
+        client = AgentCoreMemoryClient()
+
+        result = {}
+
+        # 통계
+        stats = client.get_stats(alert_name)
+        if stats:
+            result["stats"] = stats
+
+        # 유사 인시던트
+        similar = client.search_similar_incidents(
+            alert_name=alert_name,
+            error_message=query,
+            limit=5
+        )
+        if similar:
+            result["similar_incidents"] = similar
+
+        if not result:
+            return json.dumps({"message": f"{alert_name} 관련 이력 없음"})
+
+        return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@tool
+def get_ongoing_alarms() -> str:
+    """현재 발화 중인 알람 목록을 DynamoDB에서 조회합니다.
+
+    사용 시나리오:
+    - "지금 발화 중인 알람 있어?"
+    - "현재 어떤 알람이 켜져 있어?"
+    """
+    try:
+        TABLE_NAME = os.environ.get("DYNAMODB_INCIDENT_TABLE", "")
+        if not TABLE_NAME:
+            return json.dumps({"message": "DYNAMODB_INCIDENT_TABLE 환경변수 미설정"})
+
+        dynamodb = boto3.client("dynamodb", region_name=AWS_REGION)
+        resp = dynamodb.scan(TableName=TABLE_NAME)
+        items = resp.get("Items", [])
+
+        if not items:
+            return json.dumps({"message": "현재 발화 중인 알람 없음"})
+
+        alarms = []
+        for item in items:
+            alarms.append({
+                "alert_name": item.get("alert_name", {}).get("S", ""),
+                "severity": item.get("severity", {}).get("S", ""),
+                "started_at": item.get("started_at", {}).get("S", ""),
+                "root_cause": item.get("root_cause", {}).get("S", "분석 중"),
+            })
+
+        return json.dumps({"ongoing_alarms": alarms, "count": len(alarms)},
+                          ensure_ascii=False, default=str)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@tool
+def get_active_services() -> str:
+    """현재 AMP에 메트릭을 전송 중인 서비스 목록을 조회합니다.
+
+    사용 시나리오:
+    - "현재 메트릭 보내는 서비스가 뭐뭐야?"
+    - "어떤 서비스들이 모니터링되고 있어?"
+    """
+    try:
+        q = urllib.parse.quote("job:http_known_services:presence", safe="")
+        url = f"{_amp_base_url()}/query?query={q}"
+        print(f"[TOOL] get_active_services url={url}")
+        data = _amp_signed_request(url)
+        items = data.get("data", {}).get("result", [])
+        print(f"[TOOL] get_active_services items={len(items)}")
+
+        if not items:
+            return json.dumps({"message": "현재 활성 서비스 없음"})
+
+        services = []
+        for v in items:
+            metric = v.get("metric", {})
+            services.append({
+                "job": metric.get("job", ""),
+                "environment": metric.get("deployment_environment", ""),
+            })
+
+        return json.dumps({"active_services": services, "count": len(services)},
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+# ============================================================
+# Athena 헬퍼
+# ============================================================
+
+def _athena_run_query(sql: str, timeout_sec: int = 60) -> list[dict]:
+    """Athena 쿼리 실행 후 결과를 딕셔너리 리스트로 반환"""
+    if not ATHENA_OUTPUT:
+        raise ValueError("ATHENA_OUTPUT_BUCKET 환경변수 미설정")
+
+    athena = boto3.client("athena", region_name=AWS_REGION)
+    resp = athena.start_query_execution(
+        QueryString=sql,
+        QueryExecutionContext={"Database": ATHENA_DB},
+        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT},
+    )
+    qid = resp["QueryExecutionId"]
+
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        status = athena.get_query_execution(QueryExecutionId=qid)
+        state = status["QueryExecution"]["Status"]["State"]
+        if state == "SUCCEEDED":
+            break
+        elif state in ("FAILED", "CANCELLED"):
+            reason = status["QueryExecution"]["Status"].get("StateChangeReason", "")
+            raise RuntimeError(f"Athena query {state}: {reason}")
+        time.sleep(2)
+    else:
+        athena.stop_query_execution(QueryExecutionId=qid)
+        raise TimeoutError(f"Athena query timed out after {timeout_sec}s")
+
+    # 결과 수집
+    pages = athena.get_paginator("get_query_results").paginate(QueryExecutionId=qid)
+    rows = []
+    headers = None
+    for page in pages:
+        result_rows = page["ResultSet"]["Rows"]
+        if headers is None:
+            headers = [c["VarCharValue"] for c in result_rows[0]["Data"]]
+            result_rows = result_rows[1:]
+        for row in result_rows:
+            values = [c.get("VarCharValue", "") for c in row["Data"]]
+            rows.append(dict(zip(headers, values)))
+
+    return rows
+
+
+@tool
+def query_historical_logs(
+    service_name: str = "",
+    severity: str = "",
+    keyword: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    limit: int = 50,
+) -> str:
+    """S3에 저장된 장기 로그 이력을 Athena로 조회합니다. OpenSearch보다 오래된 데이터 조회에 사용합니다.
+
+    Args:
+        service_name: 서비스명 (예: "springboot", "thymeleaf"). 빈 문자열이면 전체 서비스.
+        severity:     로그 심각도 필터 (예: "ERROR", "WARN", "INFO"). 빈 문자열이면 전체.
+        keyword:      로그 본문 키워드 검색 (예: "OutOfMemoryError", "timeout").
+        start_date:   조회 시작 날짜 (YYYY-MM-DD 형식). 빈 문자열이면 오늘.
+        end_date:     조회 종료 날짜 (YYYY-MM-DD 형식). 빈 문자열이면 오늘.
+        limit:        최대 반환 건수 (기본 50, 최대 200).
+
+    사용 시나리오:
+    - "지난주 springboot ERROR 로그 검색해줘"
+    - "2주 전 OutOfMemoryError 발생 이력 알려줘"
+    - "3월 15일 장애 당시 로그 보여줘"
+    """
+    try:
+        today = datetime.now(timezone.utc)
+        if not start_date:
+            start_date = today.strftime("%Y-%m-%d")
+        if not end_date:
+            end_date = today.strftime("%Y-%m-%d")
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt   = datetime.strptime(end_date, "%Y-%m-%d")
+
+        limit = min(int(limit), 200)
+
+        # 파티션 필터 생성
+        partition_filter = (
+            f"(year > '{start_dt.year}' OR (year = '{start_dt.year}' AND month >= '{start_dt.month:02d}')) "
+            f"AND (year < '{end_dt.year}' OR (year = '{end_dt.year}' AND month <= '{end_dt.month:02d}'))"
+        )
+
+        # UNNEST 후 WHERE 조건 (파티션 필터는 외부 WHERE, 나머지는 HAVING처럼 서브쿼리로)
+        svc_expr = "element_at(transform(filter(rl.resource.attributes, x -> x.key = 'service.name'), x -> x.value.stringvalue), 1)"
+
+        extra_conditions = []
+        if service_name:
+            safe_svc = service_name.replace("'", "''")
+            extra_conditions.append(f"lower({svc_expr}) LIKE lower('%{safe_svc}%')")
+        if severity:
+            extra_conditions.append(f"upper(lr.severitytext) = upper('{severity}')")
+        if keyword:
+            safe_kw = keyword.replace("'", "''")
+            extra_conditions.append(f"lower(lr.body.stringvalue) LIKE lower('%{safe_kw}%')")
+
+        extra_where = ("AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
+
+        sql = f"""
+SELECT
+    from_unixtime(cast(lr.timeunixnano AS bigint) / 1000000000)                                   AS log_time,
+    element_at(transform(filter(rl.resource.attributes, x -> x.key = 'service.namespace'),
+               x -> x.value.stringvalue), 1)                                                      AS service_namespace,
+    {svc_expr}                                                                                     AS svc_name,
+    lr.severitytext                                                                                AS severity,
+    substr(lr.body.stringvalue, 1, 300)                                                           AS body,
+    year,
+    month,
+    day,
+    hour
+FROM log_platform_dev_observability.otel_logs
+CROSS JOIN UNNEST(resourcelogs) AS t(rl)
+CROSS JOIN UNNEST(rl.scopelogs) AS t2(sl)
+CROSS JOIN UNNEST(sl.logrecords) AS t3(lr)
+WHERE {partition_filter}
+  {extra_where}
+ORDER BY lr.timeunixnano DESC
+LIMIT {limit}
+"""
+        rows = _athena_run_query(sql.strip())
+
+        if not rows:
+            return json.dumps({"message": "조건에 맞는 로그 없음", "query_range": f"{start_date} ~ {end_date}"})
+
+        return json.dumps({
+            "total": len(rows),
+            "query_range": f"{start_date} ~ {end_date}",
+            "logs": rows,
+        }, ensure_ascii=False, default=str)
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@tool
+def query_historical_traces(
+    service_name: str = "",
+    status_code: str = "",
+    min_duration_ms: int = 0,
+    start_date: str = "",
+    end_date: str = "",
+    limit: int = 50,
+) -> str:
+    """S3에 저장된 장기 트레이스 이력을 Athena로 조회합니다. 느린 API, 오류 트레이스 분석에 사용합니다.
+
+    Args:
+        service_name:    서비스명 (예: "springboot"). 빈 문자열이면 전체.
+        status_code:     HTTP 상태코드 필터 (예: "500", "404"). 빈 문자열이면 전체.
+        min_duration_ms: 최소 응답시간(ms) 필터. 느린 요청 조회에 사용 (예: 1000 = 1초 이상).
+        start_date:      조회 시작 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
+        end_date:        조회 종료 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
+        limit:           최대 반환 건수 (기본 50, 최대 200).
+
+    사용 시나리오:
+    - "지난주 5초 이상 걸린 API 요청 알려줘"
+    - "어제 500 에러 발생한 트레이스 보여줘"
+    - "3월 10일 장애 당시 느린 트레이스 분석해줘"
+    """
+    try:
+        today = datetime.now(timezone.utc)
+        if not start_date:
+            start_date = today.strftime("%Y-%m-%d")
+        if not end_date:
+            end_date = today.strftime("%Y-%m-%d")
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt   = datetime.strptime(end_date, "%Y-%m-%d")
+
+        limit = min(int(limit), 200)
+
+        partition_filter = (
+            f"(year > '{start_dt.year}' OR (year = '{start_dt.year}' AND month >= '{start_dt.month:02d}')) "
+            f"AND (year < '{end_dt.year}' OR (year = '{end_dt.year}' AND month <= '{end_dt.month:02d}'))"
+        )
+
+        svc_expr_trace = "element_at(transform(filter(rs.resource.attributes, x -> x.key = 'service.name'), x -> x.value.stringvalue), 1)"
+
+        extra_conditions = []
+        if service_name:
+            safe_svc = service_name.replace("'", "''")
+            extra_conditions.append(f"lower({svc_expr_trace}) LIKE lower('%{safe_svc}%')")
+        if status_code:
+            extra_conditions.append(
+                f"element_at(transform(filter(sp.attributes, x -> x.key = 'http.status_code'), "
+                f"x -> x.value.stringvalue), 1) = '{status_code}'"
+            )
+        if min_duration_ms > 0:
+            min_ns = min_duration_ms * 1_000_000
+            extra_conditions.append(
+                f"(cast(sp.endtimeunixnano AS bigint) - cast(sp.starttimeunixnano AS bigint)) >= {min_ns}"
+            )
+
+        extra_where = ("AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
+
+        sql = f"""
+SELECT
+    from_unixtime(cast(sp.starttimeunixnano AS bigint) / 1000000000)                              AS span_time,
+    element_at(transform(filter(rs.resource.attributes, x -> x.key = 'service.namespace'),
+               x -> x.value.stringvalue), 1)                                                      AS service_namespace,
+    element_at(transform(filter(rs.resource.attributes, x -> x.key = 'service.name'),
+               x -> x.value.stringvalue), 1)                                                      AS svc_name,
+    sp.name                                                                                        AS span_name,
+    element_at(transform(filter(sp.attributes, x -> x.key = 'http.method'),
+               x -> x.value.stringvalue), 1)                                                      AS http_method,
+    element_at(transform(filter(sp.attributes, x -> x.key = 'http.target'),
+               x -> x.value.stringvalue), 1)                                                      AS http_target,
+    element_at(transform(filter(sp.attributes, x -> x.key = 'http.status_code'),
+               x -> x.value.stringvalue), 1)                                                      AS http_status_code,
+    round(cast(sp.endtimeunixnano AS double) / 1000000 -
+          cast(sp.starttimeunixnano AS double) / 1000000, 2)                                      AS duration_ms,
+    sp.traceid                                                                                     AS trace_id,
+    year,
+    month,
+    day
+FROM log_platform_dev_observability.otel_traces
+CROSS JOIN UNNEST(resourcespans) AS t(rs)
+CROSS JOIN UNNEST(rs.scopespans) AS t2(ss)
+CROSS JOIN UNNEST(ss.spans) AS t3(sp)
+WHERE {partition_filter}
+  {extra_where}
+ORDER BY duration_ms DESC
+LIMIT {limit}
+"""
+        rows = _athena_run_query(sql.strip())
+
+        if not rows:
+            return json.dumps({"message": "조건에 맞는 트레이스 없음", "query_range": f"{start_date} ~ {end_date}"})
+
+        return json.dumps({
+            "total": len(rows),
+            "query_range": f"{start_date} ~ {end_date}",
+            "traces": rows,
+        }, ensure_ascii=False, default=str)
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@tool
+def query_log_error_summary(
+    start_date: str = "",
+    end_date: str = "",
+) -> str:
+    """기간별 서비스/심각도 별 로그 발생 건수를 집계합니다. 장애 기간의 오류 패턴 파악에 유용합니다.
+
+    Args:
+        start_date: 집계 시작 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
+        end_date:   집계 종료 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
+
+    사용 시나리오:
+    - "지난 일주일 동안 서비스별 에러 건수 알려줘"
+    - "어제 어떤 서비스에서 오류가 가장 많이 났어?"
+    - "이번 달 ERROR 로그 통계 보여줘"
+    """
+    try:
+        today = datetime.now(timezone.utc)
+        if not start_date:
+            start_date = today.strftime("%Y-%m-%d")
+        if not end_date:
+            end_date = today.strftime("%Y-%m-%d")
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt   = datetime.strptime(end_date, "%Y-%m-%d")
+
+        partition_filter = (
+            f"(year > '{start_dt.year}' OR (year = '{start_dt.year}' AND month >= '{start_dt.month:02d}')) "
+            f"AND (year < '{end_dt.year}' OR (year = '{end_dt.year}' AND month <= '{end_dt.month:02d}'))"
+        )
+
+        sql = f"""
+SELECT
+    year,
+    month,
+    day,
+    element_at(transform(filter(rl.resource.attributes, x -> x.key = 'service.name'),
+               x -> x.value.stringvalue), 1)     AS service_name,
+    lr.severitytext                               AS severity,
+    count(*)                                      AS log_count
+FROM log_platform_dev_observability.otel_logs
+CROSS JOIN UNNEST(resourcelogs) AS t(rl)
+CROSS JOIN UNNEST(rl.scopelogs) AS t2(sl)
+CROSS JOIN UNNEST(sl.logrecords) AS t3(lr)
+WHERE {partition_filter}
+  AND upper(lr.severitytext) IN ('ERROR', 'WARN', 'FATAL')
+GROUP BY year, month, day,
+    element_at(transform(filter(rl.resource.attributes, x -> x.key = 'service.name'),
+               x -> x.value.stringvalue), 1),
+    lr.severitytext
+ORDER BY year DESC, month DESC, day DESC, log_count DESC
+LIMIT 200
+"""
+        rows = _athena_run_query(sql.strip())
+
+        if not rows:
+            return json.dumps({"message": "해당 기간 ERROR/WARN 로그 없음", "query_range": f"{start_date} ~ {end_date}"})
+
+        return json.dumps({
+            "query_range": f"{start_date} ~ {end_date}",
+            "summary": rows,
+        }, ensure_ascii=False, default=str)
+
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})

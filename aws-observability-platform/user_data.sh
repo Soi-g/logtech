@@ -49,10 +49,10 @@ processors:
     attributes:
       - key: service.namespace
         value: "todolist"
-        action: upsert
+        action: insert
       - key: deployment.environment
         value: "dev"
-        action: upsert
+        action: insert
 
   resource/app:
     attributes:
@@ -550,3 +550,88 @@ for PATTERN in "logs-app" "logs-host" "traces-app"; do
 done
 
 echo "인덱스 템플릿 생성 완료"
+
+# ============================================================
+# Observability 챗봇 설치 및 서비스 등록
+# ============================================================
+echo "챗봇 설치 중..."
+
+apt-get install -y python3-pip python3-venv git
+
+# 챗봇 디렉토리 구성
+mkdir -p /home/ubuntu/chatbot/templates
+mkdir -p /home/ubuntu/lambda_package
+
+# requirements.txt
+cat > /home/ubuntu/chatbot/requirements.txt << 'REQEOF'
+fastapi==0.115.0
+uvicorn>=0.31.1
+strands-agents==1.28.0
+boto3==1.42.60
+langchain-aws==1.3.1
+pydantic>=2.10.6
+opensearch-py==3.1.0
+requests-aws4auth==1.3.1
+python-dotenv>=1.0.0
+REQEOF
+
+# .env 파일 생성 (Terraform 변수로 채움)
+cat > /home/ubuntu/chatbot/.env << ENVEOF
+AMP_ENDPOINT=${amp_remote_write_url}
+OPENSEARCH_ENDPOINT=${opensearch_endpoint}
+OPENSEARCH_USER=${opensearch_master_user}
+OPENSEARCH_PASSWORD=${opensearch_master_password}
+DYNAMODB_INCIDENT_TABLE=${project_name}-incident-ongoing
+AWS_REGION_NAME=${aws_region}
+BEDROCK_MODEL_ID=apac.anthropic.claude-sonnet-4-20250514-v1:0
+AGENTCORE_MEMORY_ID=${agentcore_memory_id}
+ATHENA_DATABASE=${project_name_underscore}_observability
+ATHENA_OUTPUT_BUCKET=s3://${athena_results_bucket}/chatbot-queries/
+LOGS_BUCKET=${logs_bucket}
+TRACES_BUCKET=${traces_bucket}
+ENVEOF
+
+# Python venv 생성 및 패키지 설치
+cd /home/ubuntu/chatbot
+python3 -m venv venv
+source venv/bin/activate
+pip install -q --upgrade pip
+pip install -q -r requirements.txt
+deactivate
+
+chown -R ubuntu:ubuntu /home/ubuntu/chatbot /home/ubuntu/lambda_package
+
+# S3에서 챗봇 코드 다운로드
+aws s3 cp s3://${logs_bucket}/chatbot-deploy/chatbot.tar.gz /tmp/chatbot.tar.gz --region ${aws_region} || true
+if [ -f /tmp/chatbot.tar.gz ]; then
+  tar -xzf /tmp/chatbot.tar.gz -C /home/ubuntu/
+  chown -R ubuntu:ubuntu /home/ubuntu/chatbot /home/ubuntu/lambda_package
+  echo "챗봇 코드 다운로드 완료"
+else
+  echo "챗봇 코드 없음 - 나중에 배포 필요"
+fi
+
+# systemd 서비스 등록
+cat > /etc/systemd/system/chatbot.service << 'SVCEOF'
+[Unit]
+Description=Observability Chatbot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/chatbot
+ExecStart=/home/ubuntu/chatbot/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+systemctl daemon-reload
+systemctl enable chatbot
+
+echo "챗봇 설치 완료 (코드 배포 후 자동 시작됨)"

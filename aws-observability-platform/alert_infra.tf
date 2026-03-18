@@ -253,7 +253,7 @@ resource "aws_lambda_function" "agent" {
       OPENSEARCH_ENDPOINT     = aws_opensearch_domain.main.endpoint
       OPENSEARCH_USER         = var.opensearch_master_user
       OPENSEARCH_PASSWORD     = var.opensearch_master_password
-      BEDROCK_KB_ID           = aws_bedrockagent_knowledge_base.runbooks.id
+      # BEDROCK_KB_ID           = aws_bedrockagent_knowledge_base.runbooks.id
       SLACK_BOT_TOKEN         = var.slack_bot_token
       SLACK_CHANNEL           = var.slack_channel
       AWS_REGION_NAME         = var.aws_region

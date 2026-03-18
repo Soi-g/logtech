@@ -1,4 +1,82 @@
 groups:
+  # 서비스 존재 여부 — Java(seconds) + Python/Flask(milliseconds) 모두 포함
+  - name: service_presence
+    interval: 30s
+    rules:
+      - record: job:http_known_services:presence
+        expr: |
+          (
+            group by (job, deployment_environment) (
+              http_server_request_duration_seconds_count
+            )
+          ) or (
+            group by (job, deployment_environment) (
+              http_server_duration_milliseconds_count
+            )
+          )
+
+  # Flask (Python OTel) — milliseconds 단위 메트릭
+  - name: flask_derived_metrics
+    interval: 30s
+    rules:
+      - record: app_http_server_errors_flask_5m
+        expr: |
+          round(
+            (
+              sum by (job, http_route) (
+                increase(
+                  http_server_duration_milliseconds_count{
+                    http_response_status_code=~"5..",
+                    http_route!="/error"
+                  }[5m]
+                )
+              )
+            )
+            or on (job, http_route)
+            (
+              0
+              *
+              sum by (job, http_route) (
+                increase(
+                  http_server_duration_milliseconds_count{
+                    http_route!="/error"
+                  }[5m]
+                )
+              )
+            )
+          )
+
+      - record: app_http_server_requests_flask_5m
+        expr: |
+          round(
+            sum by (job, http_route) (
+              increase(
+                http_server_duration_milliseconds_count{
+                  http_route!="/error"
+                }[5m]
+              )
+            )
+          )
+
+      - record: app_http_server_error_ratio_flask_5m
+        expr: |
+          app_http_server_errors_flask_5m
+          /
+          clamp_min(app_http_server_requests_flask_5m, 1)
+
+      - record: app_http_server_latency_flask_p95_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, http_route, le) (
+              rate(
+                http_server_duration_milliseconds_bucket{
+                  http_route!="/error"
+                }[5m]
+              )
+            )
+          )
+
   - name: app_derived_metrics
     interval: 30s
     rules:
