@@ -198,6 +198,22 @@ resource "aws_db_instance" "postgres" {
   tags = { Name = "${var.project_name}-customer-postgres" }
 }
 
+# ─── Platform OTel Collector EC2 IP 자동 조회 ────────────────────────────────
+data "aws_instance" "otel_collector" {
+  filter {
+    name   = "tag:Name"
+    values = ["${var.project_name}-otel-collector"]
+  }
+  filter {
+    name   = "instance-state-name"
+    values = ["running"]
+  }
+}
+
+locals {
+  gateway_endpoint = "${data.aws_instance.otel_collector.public_ip}:14317"
+}
+
 # ─── EC2 #2 — Backend (Spring Boot) ──────────────────────────────────────────
 # Frontend user_data에서 backend private IP를 사용하므로 먼저 생성
 
@@ -214,7 +230,7 @@ resource "aws_instance" "backend" {
   }
 
   user_data = templatefile("${path.module}/templates/user_data_backend.sh.tpl", {
-    gateway_endpoint = var.otel_gateway_endpoint
+    gateway_endpoint = local.gateway_endpoint
     rds_endpoint     = aws_db_instance.postgres.address
     environment      = var.environment
     instance_name    = "${var.project_name}-customer-backend"
@@ -240,7 +256,7 @@ resource "aws_instance" "frontend" {
   }
 
   user_data = templatefile("${path.module}/templates/user_data_frontend.sh.tpl", {
-    gateway_endpoint   = var.otel_gateway_endpoint
+    gateway_endpoint   = local.gateway_endpoint
     backend_private_ip = aws_instance.backend.private_ip
     environment        = var.environment
     instance_name      = "${var.project_name}-customer-frontend"

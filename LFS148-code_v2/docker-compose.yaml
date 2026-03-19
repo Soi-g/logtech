@@ -58,7 +58,7 @@ services:
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=todolist,deployment.environment=dev,service.name=thymeleaf
 
   todoui-flask:
-    image: ghcr.io/lftraining/lfs148-code-todoui-flask:v2404
+    image: todoui-flask:dev
     build:
       context: ./todoui-flask
     networks:
@@ -71,6 +71,7 @@ services:
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_METRICS_EXPORTER=otlp
       - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_SERVICE_NAME=flask
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=todolist,deployment.environment=dev,service.name=flask
 
   loadgenerator:
@@ -84,6 +85,7 @@ services:
     image: ${COLLECTOR_CONTRIB_IMAGE}
     restart: unless-stopped
     user: "0"
+    hostname: k8s-master1
     networks:
       - todonet
     env_file:

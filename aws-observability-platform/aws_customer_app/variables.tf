@@ -10,12 +10,6 @@ variable "aws_region" {
   default     = "ap-northeast-2"
 }
 
-variable "otel_gateway_endpoint" {
-  description = "플랫폼 OTel Gateway 주소 (host:port). 플랫폼 EC2 public IP + 4317 포트."
-  type        = string
-  # 예: "52.79.160.26:4317"
-}
-
 variable "ec2_ami_id" {
   description = "EC2 AMI ID (Ubuntu 22.04)"
   type        = string

@@ -4,6 +4,15 @@ import logging
 import requests
 import os
 
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+
+# OTel 로깅 브릿지 — LoggingHandler를 root logger에 직접 추가
+_lp = LoggerProvider()
+_lp.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter()))
+logging.getLogger().addHandler(LoggingHandler(level=logging.NOTSET, logger_provider=_lp))
+
 app = Flask(__name__)
 logging.getLogger(__name__)
 logging.basicConfig(format='%(levelname)s:%(name)s:%(module)s:%(message)s', level=logging.INFO)

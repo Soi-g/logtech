@@ -161,6 +161,17 @@ processors:
         value: "container"
         action: upsert
 
+  transform/container_hostname:
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["host.name"], attributes["container.hostname"]) where attributes["container.hostname"] != nil
+
+  resourcedetection:
+    detectors: [system]
+    system:
+      hostname_sources: [os]
+
   resource/host:
     attributes:
       - key: service.namespace
@@ -210,12 +221,12 @@ service:
 
     metrics/container:
       receivers: [docker_stats]
-      processors: [memory_limiter, resource/container, batch]
+      processors: [memory_limiter, resource/container, transform/container_hostname, batch]
       exporters: [otlp/gateway]
 
     metrics/host:
       receivers: [hostmetrics]
-      processors: [memory_limiter, resource/host, batch]
+      processors: [memory_limiter, resourcedetection, resource/host, batch]
       exporters: [otlp/gateway]
 
     logs/app:
