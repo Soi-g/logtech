@@ -42,7 +42,7 @@ processors:
     spike_limit_mib: 128
 
   batch:
-    timeout: 10s
+    timeout: 60s
     send_batch_size: 2048
 
   resource/common:
@@ -104,19 +104,37 @@ processors:
           - set(time, Now()) where time_unix_nano == 0
 
 connectors:
+  # 1단계: deployment.environment(dev/prod) + source 조합으로 라우팅
   routing/metrics:
     table:
+      - condition: resource.attributes["deployment.environment"] == "prod" and resource.attributes["source"] == "container"
+        pipelines: [metrics/prod_container]
+      - condition: resource.attributes["deployment.environment"] == "prod" and resource.attributes["source"] == "host"
+        pipelines: [metrics/prod_host]
+      - condition: resource.attributes["deployment.environment"] == "prod"
+        pipelines: [metrics/prod_app]
       - condition: resource.attributes["source"] == "container"
-        pipelines: [metrics/container]
+        pipelines: [metrics/dev_container]
       - condition: resource.attributes["source"] == "host"
-        pipelines: [metrics/host]
-    default_pipelines: [metrics/app]
+        pipelines: [metrics/dev_host]
+    default_pipelines: [metrics/dev_app]
 
   routing/logs:
     table:
+      - condition: resource.attributes["deployment.environment"] == "prod" and resource.attributes["source"] == "sys"
+        pipelines: [logs/prod_host]
+      - condition: resource.attributes["deployment.environment"] == "prod"
+        pipelines: [logs/prod_app]
       - condition: resource.attributes["source"] == "sys"
-        pipelines: [logs/host]
-    default_pipelines: [logs/app]
+        pipelines: [logs/dev_host]
+    default_pipelines: [logs/dev_app]
+
+  routing/traces:
+    table:
+      - condition: resource.attributes["deployment.environment"] == "prod"
+        pipelines: [traces/prod]
+    default_pipelines: [traces/dev]
+
 
 exporters:
   debug:
@@ -168,28 +186,121 @@ exporters:
       num_consumers: 4
       queue_size: 2048
 
-  awss3/logs:
+  # ── Dev 환경 S3 exporters ──────────────────────────────────────
+  awss3/logs_dev_app:
     s3uploader:
       region: ${aws_region}
       s3_bucket: ${s3_logs_bucket}
-      s3_prefix: "telemetry/raw/logs"
+      s3_prefix: "dev/app"
       compression: gzip
       file_prefix: logs
     marshaler: otlp_json
 
-  awss3/traces:
+  awss3/logs_dev_host:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_logs_bucket}
+      s3_prefix: "dev/host"
+      compression: gzip
+      file_prefix: logs
+    marshaler: otlp_json
+
+  awss3/traces_dev:
     s3uploader:
       region: ${aws_region}
       s3_bucket: ${s3_traces_bucket}
-      s3_prefix: "telemetry/raw/traces"
+      s3_prefix: "dev/app"
       compression: gzip
       file_prefix: traces
+    marshaler: otlp_json
+
+  awss3/metrics_dev_app:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_metrics_bucket}
+      s3_prefix: "dev/app"
+      compression: gzip
+      file_prefix: metrics
+    marshaler: otlp_json
+
+  awss3/metrics_dev_container:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_metrics_bucket}
+      s3_prefix: "dev/container"
+      compression: gzip
+      file_prefix: metrics
+    marshaler: otlp_json
+
+  awss3/metrics_dev_host:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_metrics_bucket}
+      s3_prefix: "dev/host"
+      compression: gzip
+      file_prefix: metrics
+    marshaler: otlp_json
+
+  # ── Prod 환경 S3 exporters ─────────────────────────────────────
+  awss3/logs_prod_app:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_logs_bucket}
+      s3_prefix: "prod/app"
+      compression: gzip
+      file_prefix: logs
+    marshaler: otlp_json
+
+  awss3/logs_prod_host:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_logs_bucket}
+      s3_prefix: "prod/host"
+      compression: gzip
+      file_prefix: logs
+    marshaler: otlp_json
+
+  awss3/traces_prod:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_traces_bucket}
+      s3_prefix: "prod/app"
+      compression: gzip
+      file_prefix: traces
+    marshaler: otlp_json
+
+  awss3/metrics_prod_app:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_metrics_bucket}
+      s3_prefix: "prod/app"
+      compression: gzip
+      file_prefix: metrics
+    marshaler: otlp_json
+
+  awss3/metrics_prod_container:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_metrics_bucket}
+      s3_prefix: "prod/container"
+      compression: gzip
+      file_prefix: metrics
+    marshaler: otlp_json
+
+  awss3/metrics_prod_host:
+    s3uploader:
+      region: ${aws_region}
+      s3_bucket: ${s3_metrics_bucket}
+      s3_prefix: "prod/host"
+      compression: gzip
+      file_prefix: metrics
     marshaler: otlp_json
 
 service:
   extensions: [sigv4auth/aps, sigv4auth/es]
 
   pipelines:
+    # ── Ingest (모든 환경 데이터 수신 후 라우팅) ──────────────────
     metrics/ingest:
       receivers: [otlp]
       processors: [memory_limiter, resource/common, transform/trim_service_name]
@@ -200,35 +311,72 @@ service:
       processors: [memory_limiter, resource/common, transform/trim_service_name]
       exporters: [routing/logs]
 
-    metrics/app:
+    traces/ingest:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/common, transform/trim_service_name]
+      exporters: [routing/traces]
+
+    # ── Dev 환경 pipelines ────────────────────────────────────────
+    metrics/dev_app:
       receivers: [routing/metrics]
       processors: [resource/app, batch]
-      exporters: [prometheusremotewrite, debug]
+      exporters: [prometheusremotewrite, awss3/metrics_dev_app, debug]
 
-    metrics/container:
+    metrics/dev_container:
       receivers: [routing/metrics]
       processors: [resource/container, batch]
-      exporters: [prometheusremotewrite, debug]
+      exporters: [prometheusremotewrite, awss3/metrics_dev_container, debug]
 
-    metrics/host:
+    metrics/dev_host:
       receivers: [routing/metrics]
       processors: [resource/host, batch]
-      exporters: [prometheusremotewrite, debug]
+      exporters: [prometheusremotewrite, awss3/metrics_dev_host, debug]
 
-    logs/app:
+    logs/dev_app:
       receivers: [routing/logs]
       processors: [resource/app, batch]
-      exporters: [opensearch/logs_app, awss3/logs, debug]
+      exporters: [opensearch/logs_app, awss3/logs_dev_app, debug]
 
-    logs/host:
+    logs/dev_host:
       receivers: [routing/logs]
       processors: [resource/sys, transform/fix_hostlog_timestamp, batch]
-      exporters: [opensearch/logs_host, awss3/logs, debug]
+      exporters: [opensearch/logs_host, awss3/logs_dev_host, debug]
 
-    traces:
-      receivers: [otlp]
-      processors: [memory_limiter, resource/common, resource/app, transform/trim_service_name, batch]
-      exporters: [opensearch/traces, awss3/traces, debug]
+    traces/dev:
+      receivers: [routing/traces]
+      processors: [resource/app, batch]
+      exporters: [opensearch/traces, awss3/traces_dev, debug]
+
+    # ── Prod 환경 pipelines ───────────────────────────────────────
+    metrics/prod_app:
+      receivers: [routing/metrics]
+      processors: [resource/app, batch]
+      exporters: [prometheusremotewrite, awss3/metrics_prod_app, debug]
+
+    metrics/prod_container:
+      receivers: [routing/metrics]
+      processors: [resource/container, batch]
+      exporters: [prometheusremotewrite, awss3/metrics_prod_container, debug]
+
+    metrics/prod_host:
+      receivers: [routing/metrics]
+      processors: [resource/host, batch]
+      exporters: [prometheusremotewrite, awss3/metrics_prod_host, debug]
+
+    logs/prod_app:
+      receivers: [routing/logs]
+      processors: [resource/app, batch]
+      exporters: [opensearch/logs_app, awss3/logs_prod_app, debug]
+
+    logs/prod_host:
+      receivers: [routing/logs]
+      processors: [resource/sys, transform/fix_hostlog_timestamp, batch]
+      exporters: [opensearch/logs_host, awss3/logs_prod_host, debug]
+
+    traces/prod:
+      receivers: [routing/traces]
+      processors: [resource/app, batch]
+      exporters: [opensearch/traces, awss3/traces_prod, debug]
 EOF
 
 chown otelcol:otelcol /etc/otelcol/config.yaml
@@ -583,7 +731,7 @@ OPENSEARCH_USER=${opensearch_master_user}
 OPENSEARCH_PASSWORD=${opensearch_master_password}
 DYNAMODB_INCIDENT_TABLE=${project_name}-incident-ongoing
 AWS_REGION_NAME=${aws_region}
-BEDROCK_MODEL_ID=apac.anthropic.claude-sonnet-4-20250514-v1:0
+BEDROCK_MODEL_ID=us.anthropic.claude-3-5-haiku-20241022-v1:0
 AGENTCORE_MEMORY_ID=${agentcore_memory_id}
 ATHENA_DATABASE=${project_name_underscore}_observability
 ATHENA_OUTPUT_BUCKET=s3://${athena_results_bucket}/chatbot-queries/
@@ -602,14 +750,12 @@ deactivate
 chown -R ubuntu:ubuntu /home/ubuntu/chatbot /home/ubuntu/lambda_package
 
 # S3에서 챗봇 코드 다운로드
-aws s3 cp s3://${logs_bucket}/chatbot-deploy/chatbot.tar.gz /tmp/chatbot.tar.gz --region ${aws_region} || true
-if [ -f /tmp/chatbot.tar.gz ]; then
-  tar -xzf /tmp/chatbot.tar.gz -C /home/ubuntu/
-  chown -R ubuntu:ubuntu /home/ubuntu/chatbot /home/ubuntu/lambda_package
-  echo "챗봇 코드 다운로드 완료"
-else
-  echo "챗봇 코드 없음 - 나중에 배포 필요"
-fi
+apt-get install -y unzip awscli
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+/usr/bin/aws s3 cp s3://${deploy_bucket}/chatbot/chatbot.zip /tmp/chatbot.zip --region ${aws_region}
+unzip -o /tmp/chatbot.zip -d /home/ubuntu/
+chown -R ubuntu:ubuntu /home/ubuntu/chatbot /home/ubuntu/lambda_package
+echo "챗봇 코드 다운로드 완료"
 
 # systemd 서비스 등록
 cat > /etc/systemd/system/chatbot.service << 'SVCEOF'
@@ -633,5 +779,6 @@ SVCEOF
 
 systemctl daemon-reload
 systemctl enable chatbot
+systemctl start chatbot
 
-echo "챗봇 설치 완료 (코드 배포 후 자동 시작됨)"
+echo "챗봇 설치 완료"

@@ -989,6 +989,7 @@ def query_historical_logs(
     start_date: str = "",
     end_date: str = "",
     limit: int = 50,
+    environment: str = "dev",
 ) -> str:
     """S3에 저장된 장기 로그 이력을 Athena로 조회합니다. OpenSearch보다 오래된 데이터 조회에 사용합니다.
 
@@ -999,11 +1000,13 @@ def query_historical_logs(
         start_date:   조회 시작 날짜 (YYYY-MM-DD 형식). 빈 문자열이면 오늘.
         end_date:     조회 종료 날짜 (YYYY-MM-DD 형식). 빈 문자열이면 오늘.
         limit:        최대 반환 건수 (기본 50, 최대 200).
+        environment:  환경 필터 ("dev" = VM/Docker, "prod" = EC2/AWS). 기본 "dev".
 
     사용 시나리오:
     - "지난주 springboot ERROR 로그 검색해줘"
     - "2주 전 OutOfMemoryError 발생 이력 알려줘"
     - "3월 15일 장애 당시 로그 보여줘"
+    - "prod 환경 오늘 에러 로그 보여줘"
     """
     try:
         today = datetime.now(timezone.utc)
@@ -1017,8 +1020,10 @@ def query_historical_logs(
 
         limit = min(int(limit), 200)
 
-        # 파티션 필터 생성
+        # 파티션 필터 생성 (deployment_environment 최상위 파티션 포함)
+        env_clause = f"deployment_environment = '{environment}' AND " if environment else ""
         partition_filter = (
+            f"{env_clause}"
             f"(year > '{start_dt.year}' OR (year = '{start_dt.year}' AND month >= '{start_dt.month:02d}')) "
             f"AND (year < '{end_dt.year}' OR (year = '{end_dt.year}' AND month <= '{end_dt.month:02d}'))"
         )
@@ -1050,7 +1055,7 @@ SELECT
     month,
     day,
     hour
-FROM log_platform_dev_observability.otel_logs
+FROM log_platform_dev_observability.otel_logs_app
 CROSS JOIN UNNEST(resourcelogs) AS t(rl)
 CROSS JOIN UNNEST(rl.scopelogs) AS t2(sl)
 CROSS JOIN UNNEST(sl.logrecords) AS t3(lr)
@@ -1082,6 +1087,7 @@ def query_historical_traces(
     start_date: str = "",
     end_date: str = "",
     limit: int = 50,
+    environment: str = "dev",
 ) -> str:
     """S3에 저장된 장기 트레이스 이력을 Athena로 조회합니다. 느린 API, 오류 트레이스 분석에 사용합니다.
 
@@ -1092,6 +1098,7 @@ def query_historical_traces(
         start_date:      조회 시작 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
         end_date:        조회 종료 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
         limit:           최대 반환 건수 (기본 50, 최대 200).
+        environment:     환경 필터 ("dev" = VM/Docker, "prod" = EC2/AWS). 기본 "dev".
 
     사용 시나리오:
     - "지난주 5초 이상 걸린 API 요청 알려줘"
@@ -1110,7 +1117,9 @@ def query_historical_traces(
 
         limit = min(int(limit), 200)
 
+        env_clause = f"deployment_environment = '{environment}' AND " if environment else ""
         partition_filter = (
+            f"{env_clause}"
             f"(year > '{start_dt.year}' OR (year = '{start_dt.year}' AND month >= '{start_dt.month:02d}')) "
             f"AND (year < '{end_dt.year}' OR (year = '{end_dt.year}' AND month <= '{end_dt.month:02d}'))"
         )
@@ -1182,12 +1191,14 @@ LIMIT {limit}
 def query_log_error_summary(
     start_date: str = "",
     end_date: str = "",
+    environment: str = "dev",
 ) -> str:
     """기간별 서비스/심각도 별 로그 발생 건수를 집계합니다. 장애 기간의 오류 패턴 파악에 유용합니다.
 
     Args:
-        start_date: 집계 시작 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
-        end_date:   집계 종료 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
+        start_date:  집계 시작 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
+        end_date:    집계 종료 날짜 (YYYY-MM-DD). 빈 문자열이면 오늘.
+        environment: 환경 필터 ("dev" = VM/Docker, "prod" = EC2/AWS). 기본 "dev".
 
     사용 시나리오:
     - "지난 일주일 동안 서비스별 에러 건수 알려줘"
@@ -1204,7 +1215,9 @@ def query_log_error_summary(
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
         end_dt   = datetime.strptime(end_date, "%Y-%m-%d")
 
+        env_clause = f"deployment_environment = '{environment}' AND " if environment else ""
         partition_filter = (
+            f"{env_clause}"
             f"(year > '{start_dt.year}' OR (year = '{start_dt.year}' AND month >= '{start_dt.month:02d}')) "
             f"AND (year < '{end_dt.year}' OR (year = '{end_dt.year}' AND month <= '{end_dt.month:02d}'))"
         )
@@ -1218,7 +1231,7 @@ SELECT
                x -> x.value.stringvalue), 1)     AS service_name,
     lr.severitytext                               AS severity,
     count(*)                                      AS log_count
-FROM log_platform_dev_observability.otel_logs
+FROM log_platform_dev_observability.otel_logs_app
 CROSS JOIN UNNEST(resourcelogs) AS t(rl)
 CROSS JOIN UNNEST(rl.scopelogs) AS t2(sl)
 CROSS JOIN UNNEST(sl.logrecords) AS t3(lr)

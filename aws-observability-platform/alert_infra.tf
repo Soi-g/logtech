@@ -103,7 +103,7 @@ resource "aws_iam_role_policy" "lambda_agent" {
         Sid      = "S3"
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = "${aws_s3_bucket.runbooks.arn}/lambda/*"
+        Resource = "${aws_s3_bucket.deploy.arn}/lambda/*"
       },
       {
         Sid      = "SelfInvoke"
@@ -204,7 +204,7 @@ data "archive_file" "lambda_agent" {
 
 # S3에 코드 zip 업로드
 resource "aws_s3_object" "lambda_agent" {
-  bucket = aws_s3_bucket.runbooks.id
+  bucket = aws_s3_bucket.deploy.id
   key    = "lambda/lambda_handler.zip"
   source = data.archive_file.lambda_agent.output_path
   etag   = data.archive_file.lambda_agent.output_md5
@@ -212,7 +212,7 @@ resource "aws_s3_object" "lambda_agent" {
 
 # S3에 layer zip 업로드
 resource "aws_s3_object" "agent_deps_layer" {
-  bucket = aws_s3_bucket.runbooks.id
+  bucket = aws_s3_bucket.deploy.id
   key    = "lambda/lambda_layer.zip"
   source = "${path.module}/lambda_layer.zip"
   etag   = filemd5("${path.module}/lambda_layer.zip")
@@ -221,7 +221,7 @@ resource "aws_s3_object" "agent_deps_layer" {
 # Lambda Layer - S3에서 로드
 resource "aws_lambda_layer_version" "agent_deps" {
   layer_name          = "${var.project_name}-agent-deps"
-  s3_bucket           = aws_s3_bucket.runbooks.id
+  s3_bucket           = aws_s3_bucket.deploy.id
   s3_key              = aws_s3_object.agent_deps_layer.key
   source_code_hash    = filebase64sha256("${path.module}/lambda_layer.zip")
   compatible_runtimes = ["python3.12"]
@@ -232,7 +232,7 @@ resource "aws_lambda_function" "agent" {
   role             = aws_iam_role.lambda_agent.arn
   handler          = "bedrock_agent_runtime_handler.lambda_handler"
   runtime          = "python3.12"
-  s3_bucket        = aws_s3_bucket.runbooks.id
+  s3_bucket        = aws_s3_bucket.deploy.id
   s3_key           = aws_s3_object.lambda_agent.key
   source_code_hash = data.archive_file.lambda_agent.output_base64sha256
   layers           = [aws_lambda_layer_version.agent_deps.arn]
@@ -322,8 +322,14 @@ resource "aws_prometheus_rule_group_namespace" "alerts" {
         rules:
           - record: job:http_known_services:presence
             expr: |
-              group by (job, deployment_environment)(
-                last_over_time(http_server_request_duration_seconds_count[24h])
+              (
+                group by (job, deployment_environment)(
+                  last_over_time(http_server_request_duration_seconds_count[24h])
+                )
+              ) or (
+                group by (job, deployment_environment)(
+                  last_over_time(http_server_duration_milliseconds_count[24h])
+                )
               )
 
       # ============================================================
@@ -340,8 +346,14 @@ resource "aws_prometheus_rule_group_namespace" "alerts" {
             expr: |
               job:http_known_services:presence
               unless
-              group by (job, deployment_environment)(
-                rate(http_server_request_duration_seconds_count[5m])
+              (
+                group by (job, deployment_environment)(
+                  rate(http_server_request_duration_seconds_count[5m])
+                )
+                or
+                group by (job, deployment_environment)(
+                  rate(http_server_duration_milliseconds_count[5m])
+                )
               )
             for: 5m
             labels:

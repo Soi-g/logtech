@@ -19,27 +19,43 @@ echo "=== 챗봇 배포 시작 ==="
 # 1. 코드 패키지 생성 (chatbot/ + lambda_package/ 필요 파일)
 echo "[1/4] 코드 패키징..."
 cd "$REPO_ROOT"
-tar -czf /tmp/chatbot.tar.gz \
-  chatbot/app.py \
-  chatbot/chat_agent.py \
-  chatbot/database.py \
-  chatbot/requirements.txt \
-  chatbot/templates/ \
-  lambda_package/agents_aws.py \
-  lambda_package/agentcore_memory.py
+# Python으로 zip 생성 (Windows/Linux 공통, 셸 tar 경로 문제 없음)
+python3 - << 'PYEOF'
+import zipfile, os, sys
+
+repo = os.getcwd()
+out  = os.path.join(repo, "chatbot_package.zip")
+
+files = [
+  ("chatbot/app.py",                         "chatbot/app.py"),
+  ("chatbot/chat_agent.py",                  "chatbot/chat_agent.py"),
+  ("chatbot/database.py",                    "chatbot/database.py"),
+  ("chatbot/requirements.txt",               "chatbot/requirements.txt"),
+  ("chatbot/templates/index.html",           "chatbot/templates/index.html"),
+  ("lambda_package/agents_aws.py",           "lambda_package/agents_aws.py"),
+  ("lambda_package/agentcore_memory.py",     "lambda_package/agentcore_memory.py"),
+]
+
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+    for src, arcname in files:
+        zf.write(os.path.join(repo, src), arcname)
+
+size = os.path.getsize(out)
+print(f"chatbot_package.zip 생성 완료: {size/1024:.1f} KB")
+PYEOF
 
 # 2. S3 업로드 (EC2 user_data가 부팅 시 이걸 받아감)
 echo "[2/4] S3 업로드..."
-aws s3 cp /tmp/chatbot.tar.gz "s3://$S3_BUCKET/chatbot-deploy/chatbot.tar.gz" --region "$AWS_REGION"
+aws s3 cp "$REPO_ROOT/chatbot_package.zip" "s3://$S3_BUCKET/chatbot-deploy/chatbot.zip" --region "$AWS_REGION"
 
 # 3. EC2에 직접 배포 (SSH)
 echo "[3/4] EC2 배포..."
-scp -o StrictHostKeyChecking=no -i "$PEM_KEY" /tmp/chatbot.tar.gz ubuntu@$EC2_IP:/tmp/
+scp -o StrictHostKeyChecking=no -i "$PEM_KEY" "$REPO_ROOT/chatbot_package.zip" ubuntu@$EC2_IP:/tmp/chatbot.zip
 
 ssh -o StrictHostKeyChecking=no -i "$PEM_KEY" ubuntu@$EC2_IP << 'ENDSSH'
 set -e
 cd /home/ubuntu
-tar -xzf /tmp/chatbot.tar.gz
+unzip -o /tmp/chatbot.zip
 chown -R ubuntu:ubuntu chatbot lambda_package
 
 cd chatbot
@@ -60,7 +76,7 @@ ENDSSH
 # 4. 접속 확인
 echo "[4/4] 접속 확인..."
 sleep 2
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$EC2_IP:8000/" || echo "000")
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$EC2_IP:8000/" 2>/dev/null || echo "000")
 if [ "$HTTP_CODE" = "200" ]; then
   echo ""
   echo "배포 완료! http://$EC2_IP:8000"

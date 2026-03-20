@@ -58,6 +58,11 @@ output "s3_runbooks_bucket" {
   value       = aws_s3_bucket.runbooks.id
 }
 
+output "s3_deploy_bucket" {
+  description = "배포 아티팩트 S3 버킷 (Lambda 코드, 챗봇 패키지)"
+  value       = aws_s3_bucket.deploy.id
+}
+
 # output "aoss_runbooks_endpoint" {
 #   description = "OpenSearch Serverless 런북 컬렉션 엔드포인트"
 #   value       = aws_opensearchserverless_collection.runbooks.collection_endpoint

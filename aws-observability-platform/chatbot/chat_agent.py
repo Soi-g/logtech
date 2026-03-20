@@ -78,7 +78,7 @@ SYSTEM_PROMPT = """당신은 AWS 옵저버빌리티 플랫폼의 AI 어시스턴
 """
 
 AWS_REGION = os.environ.get("AWS_REGION_NAME", "ap-northeast-2")
-BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5")
+BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "apac.anthropic.claude-3-5-sonnet-20241022-v2:0")
 
 
 def _build_agent() -> Agent:
@@ -87,7 +87,7 @@ def _build_agent() -> Agent:
 
     model = BedrockModel(
         model_id=BEDROCK_MODEL_ID,
-        region_name=AWS_REGION,
+        region_name="us-east-1",
     )
     return Agent(
         model=model,
