@@ -430,13 +430,15 @@ def memory_save_node(state: ObservabilityState) -> ObservabilityState:
         print(f"⏭️ 메모리 저장 스킵 - 이미 ongoing 인시던트 존재")
         return state
 
-    # AgentCore 저장
+    # AgentCore 저장 → record ID DynamoDB에 함께 보관
+    agentcore_record_id = ''
     try:
-        AgentCoreMemory().save_incident(incident_data)
+        agentcore_record_id = AgentCoreMemory().save_incident(incident_data) or ''
     except Exception as e:
         print(f"⚠️ [AgentCore] 저장 실패: {e}")
 
-    # DynamoDB ongoing 저장
+    # DynamoDB ongoing 저장 (agentcore_record_id 포함)
+    incident_data['agentcore_record_id'] = agentcore_record_id
     put_ongoing_incident(alert_name, incident_data)
     print(f"✅ 장기 메모리 저장 완료 (status: ongoing)")
 
@@ -466,21 +468,34 @@ def build_graph():
 # 장애 해결 후 메모리 저장
 # ============================================================
 
-def save_resolution(alert_name: str, report: dict, resolution_time_minutes: int):
-    """장애 해결 후 호출 (Slack 조치완료 버튼 클릭 시)"""
-    from dynamodb_incident import delete_ongoing_incident
+def save_resolution(alert_name: str, actual_resolution: str, resolution_time_minutes: float):
+    """
+    장애 해결 후 호출 (Slack 모달 제출 시).
+
+    Args:
+        alert_name:              알람 이름
+        actual_resolution:       사용자가 입력한 실제 조치 내용
+        resolution_time_minutes: 탐지부터 해결까지 소요 시간(분)
+    """
+    from dynamodb_incident import delete_ongoing_incident, get_ongoing_incident
+
+    # DynamoDB에서 root_cause / severity 가져오기 (삭제 전에)
+    ongoing = get_ongoing_incident(alert_name)
+    root_cause = ongoing.get('root_cause', 'Unknown') if ongoing else 'Unknown'
+    severity   = ongoing.get('severity', 'medium')    if ongoing else 'medium'
+
     try:
-        causes = report.get("likely_root_causes", [])
         AgentCoreMemory().save_incident({
-            "alert_name": alert_name,
-            "root_cause": causes[0] if causes else "Unknown",
-            "resolution": ", ".join(report.get("immediate_actions", [])),
-            "resolution_time": resolution_time_minutes,
-            "severity": report.get("severity", "medium"),
-            "status": "resolved",
+            "alert_name":       alert_name,
+            "root_cause":       root_cause,
+            "resolution":       actual_resolution or "조치 내용 미입력",
+            "resolution_time":  resolution_time_minutes,
+            "severity":         severity,
+            "status":           "resolved",
         })
     except Exception as e:
         print(f"⚠️ [AgentCore] 해결 이력 저장 실패: {e}")
+
     delete_ongoing_incident(alert_name)
     print(f"✅ 장애 해결 이력 저장 완료")
 

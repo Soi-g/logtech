@@ -261,9 +261,9 @@ resource "aws_iam_role_policy" "otel_collector" {
         ]
       },
       {
-        Sid    = "S3DeployRead"
+        Sid    = "S3DeployAccess"
         Effect = "Allow"
-        Action = ["s3:GetObject", "s3:ListBucket"]
+        Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
         Resource = [
           "${aws_s3_bucket.deploy.arn}",
           "${aws_s3_bucket.deploy.arn}/*"
@@ -331,7 +331,11 @@ resource "aws_iam_role_policy" "otel_collector" {
       {
         Sid    = "DynamoDBAccess"
         Effect = "Allow"
-        Action = ["dynamodb:Scan", "dynamodb:GetItem", "dynamodb:Query"]
+        Action = [
+          "dynamodb:Scan", "dynamodb:GetItem", "dynamodb:Query",
+          "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
+          "dynamodb:BatchWriteItem",
+        ]
         Resource = "arn:aws:dynamodb:${var.aws_region}:*:table/${var.project_name}-*"
       },
       {
@@ -366,6 +370,18 @@ resource "aws_iam_role_policy" "otel_collector" {
         Sid    = "GlueAccess"
         Effect = "Allow"
         Action = ["glue:GetTable", "glue:GetTables", "glue:GetDatabase", "glue:GetPartitions"]
+        Resource = "*"
+      },
+      {
+        Sid    = "AgentCoreMemoryAccess"
+        Effect = "Allow"
+        Action = [
+          "bedrock-agentcore:CreateEvent",
+          "bedrock-agentcore:RetrieveMemoryRecords",
+          "bedrock-agentcore:ListMemoryRecords",
+          "bedrock-agentcore:GetMemoryRecord",
+          "bedrock-agentcore:DeleteMemoryRecord",
+        ]
         Resource = "*"
       }
     ]
@@ -514,7 +530,9 @@ resource "aws_instance" "otel_collector" {
     athena_results_bucket      = aws_s3_bucket.athena_results.id
     logs_bucket                = aws_s3_bucket.logs_backup.id
     traces_bucket              = aws_s3_bucket.traces_backup.id
-    deploy_bucket              = aws_s3_bucket.deploy.id
+    deploy_bucket                   = aws_s3_bucket.deploy.id
+    chatbot_conversations_table     = aws_dynamodb_table.chatbot_conversations.name
+    chatbot_messages_table          = aws_dynamodb_table.chatbot_messages.name
   }))
   tags = { Name = "${var.project_name}-otel-collector" }
 
@@ -527,6 +545,8 @@ resource "aws_instance" "otel_collector" {
     aws_s3_bucket.athena_results,
     aws_s3_bucket.deploy,
     aws_s3_object.chatbot_package,
+    aws_dynamodb_table.chatbot_conversations,
+    aws_dynamodb_table.chatbot_messages,
   ]
 }
 

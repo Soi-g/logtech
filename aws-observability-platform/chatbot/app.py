@@ -60,6 +60,7 @@ def get_conversation(cid: str):
 @app.delete("/conversations/{cid}")
 def delete_conversation(cid: str):
     db.delete_conversation(cid)
+    chat_agent.delete_session(cid)
     return {"ok": True}
 
 
@@ -69,18 +70,15 @@ def chat(cid: str, body: ChatRequest):
     if not conv:
         raise HTTPException(status_code=404, detail="대화를 찾을 수 없습니다")
 
-    # 이전 메시지 로드
-    history = [
-        {"role": m["role"], "content": m["content"]}
-        for m in db.get_messages(cid)
-    ]
+    # 컨텍스트 로드 (요약본 + 최근 N턴)
+    history = db.get_context_messages(cid)
 
     # 사용자 메시지 저장
     db.add_message(cid, "user", body.message)
 
     # 에이전트 호출
     try:
-        response = chat_agent.chat(history, body.message)
+        response = chat_agent.chat(cid, history, body.message)
     except Exception as e:
         response = f"오류가 발생했습니다: {str(e)}"
 

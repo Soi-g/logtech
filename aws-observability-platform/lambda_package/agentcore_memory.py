@@ -62,11 +62,11 @@ class AgentCoreMemory:
     # Public API (incident_memory.IncidentMemory 과 동일한 시그니처)        #
     # ------------------------------------------------------------------ #
 
-    def save_incident(self, incident_data: dict):
-        """장애 이력을 AgentCore Long-term Memory에 저장."""
+    def save_incident(self, incident_data: dict) -> str | None:
+        """장애 이력을 AgentCore Long-term Memory에 저장. 성공 시 memoryRecordId 반환."""
         if not self.memory_id:
             print("⚠️ [AgentCore] AGENTCORE_MEMORY_ID 미설정 → 저장 스킵")
-            return
+            return None
 
         try:
             client = self._get_data_client()
@@ -87,12 +87,19 @@ class AgentCoreMemory:
                 }]
             )
 
-            ok  = len(response.get('successfulRecords', []))
-            ng  = len(response.get('failedRecords', []))
-            print(f"✅ [AgentCore] 장애 저장 완료: {ok}건 성공 / {ng}건 실패")
+            ok_records = response.get('successfulRecords', [])
+            ng = len(response.get('failedRecords', []))
+            print(f"✅ [AgentCore] 장애 저장 완료: {len(ok_records)}건 성공 / {ng}건 실패")
+
+            if ok_records:
+                record_id = ok_records[0].get('memoryRecordId', '')
+                print(f"   [AgentCore] record_id: {record_id}")
+                return record_id
+            return None
 
         except Exception as e:
             print(f"⚠️ [AgentCore] 장애 저장 실패 (AOSS에는 정상 저장됨): {e}")
+            return None
 
     def get_recent_ongoing_incident(self, alert_name: str) -> dict | None:
         """가장 최근 ongoing 인시던트 조회 (Phase 3)."""

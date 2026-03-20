@@ -487,6 +487,25 @@ def _send_slack_message_and_get_ts(message: dict) -> str:
         return ''
 
 
+def _open_slack_modal(trigger_id: str, modal: dict):
+    """Slack 모달 열기 (views.open)"""
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {SLACK_BOT_TOKEN}'
+    }
+    data = json.dumps({'trigger_id': trigger_id, 'view': modal}).encode('utf-8')
+    req = urllib.request.Request('https://slack.com/api/views.open', data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read())
+            if result.get('ok'):
+                print(f"✅ Slack 모달 열기 완료")
+            else:
+                print(f"⚠️ Slack 모달 열기 실패: {result.get('error')}")
+    except Exception as e:
+        print(f"❌ Slack 모달 오류: {e}")
+
+
 def _update_slack_message(message: dict):
     """Slack 메시지 업데이트"""
     import urllib.request
@@ -546,12 +565,69 @@ def _handle_slack_interaction(event: dict) -> dict:
         parsed = urllib.parse.parse_qs(body)
         payload = json.loads(parsed.get('payload', ['{}'])[0])
 
+        payload_type = payload.get('type', '')
+
+        # ── 모달 제출 처리 ──────────────────────────────────────────
+        if payload_type == 'view_submission':
+            view = payload.get('view', {})
+            if view.get('callback_id') == 'resolve_modal':
+                meta = json.loads(view.get('private_metadata', '{}'))
+                alert_name   = meta.get('alert_name', '')
+                channel_id   = meta.get('channel_id', SLACK_CHANNEL)
+                message_ts   = meta.get('message_ts', '')
+                detected_at_str = meta.get('detected_at', '')
+                user_name    = payload.get('user', {}).get('name', 'unknown')
+
+                # 실제 조치 내용
+                values = view.get('state', {}).get('values', {})
+                actual_resolution = (
+                    values.get('resolution_block', {})
+                          .get('resolution_input', {})
+                          .get('value', '')
+                )
+
+                # 해결 시간 계산
+                try:
+                    detected_at = datetime.fromisoformat(detected_at_str.replace('Z', '+00:00'))
+                    resolution_minutes = (
+                        datetime.utcnow() - detected_at.replace(tzinfo=None)
+                    ).total_seconds() / 60
+                except Exception:
+                    resolution_minutes = 0
+
+                # DynamoDB에서 root_cause 미리 조회 (save_resolution이 삭제 전에)
+                ongoing = get_ongoing_incident(alert_name)
+                root_cause = ongoing.get('root_cause', '') if ongoing else ''
+
+                # AgentCore resolved 저장 + DynamoDB 삭제
+                from graph_agent_with_memory import save_resolution
+                save_resolution(alert_name, actual_resolution, resolution_minutes)
+
+                # Slack 메시지 resolved로 업데이트
+                from slack_templates import build_resolved_message
+                resolved_msg = build_resolved_message(
+                    alert_name=alert_name,
+                    resolution_minutes=resolution_minutes,
+                    root_cause=root_cause,
+                    resolved_by=f'@{user_name}',
+                )
+                resolved_msg['channel'] = channel_id
+                resolved_msg['ts'] = message_ts
+                _update_slack_message(resolved_msg)
+
+                print(f"✅ 모달 조치완료 처리: {alert_name} ({resolution_minutes:.0f}분)")
+
+            # view_submission은 빈 200 응답 필요 (모달 닫힘)
+            return {'statusCode': 200, 'body': ''}
+
+        # ── 버튼 클릭 처리 ─────────────────────────────────────────
         action = payload.get('actions', [{}])[0]
         action_id = action.get('action_id', '')
         alert_name = action.get('value', '')
         user_name = payload.get('user', {}).get('name', 'unknown')
         channel_id = payload.get('channel', {}).get('id', SLACK_CHANNEL)
         message_ts = payload.get('message', {}).get('ts', '')
+        trigger_id = payload.get('trigger_id', '')
 
         print(f"🔘 버튼 클릭: action={action_id}, alert={alert_name}, user={user_name}")
 
@@ -590,59 +666,53 @@ def _handle_slack_interaction(event: dict) -> dict:
             return {'statusCode': 200, 'body': ''}
 
         elif action_id == 'resolve_incident':
-            # DynamoDB에서 ongoing 인시던트 찾아서 resolved 처리
+            # 조치 내용 입력 모달 팝업 (실제 처리는 view_submission에서)
             ongoing = get_ongoing_incident(alert_name)
+            root_cause_text = ongoing.get('root_cause', '분석 결과 없음') if ongoing else '분석 결과 없음'
+            detected_at_str = ongoing.get('timestamp', '') if ongoing else ''
 
-            if ongoing:
-                detected_at_str = ongoing.get('timestamp', '')
-                try:
-                    detected_at = datetime.fromisoformat(detected_at_str.replace('Z', '+00:00'))
-                    resolution_minutes = (datetime.utcnow() - detected_at.replace(tzinfo=None)).total_seconds() / 60
-                except Exception:
-                    resolution_minutes = 0
+            modal = {
+                'type': 'modal',
+                'callback_id': 'resolve_modal',
+                'private_metadata': json.dumps({
+                    'alert_name': alert_name,
+                    'channel_id': channel_id,
+                    'message_ts': message_ts,
+                    'detected_at': detected_at_str,
+                }),
+                'title': {'type': 'plain_text', 'text': '조치 완료 처리'},
+                'submit': {'type': 'plain_text', 'text': '완료'},
+                'close':  {'type': 'plain_text', 'text': '취소'},
+                'blocks': [
+                    {
+                        'type': 'section',
+                        'text': {
+                            'type': 'mrkdwn',
+                            'text': f'*알람:* `{alert_name}`\n*근본 원인:* {root_cause_text}',
+                        },
+                    },
+                    {
+                        'type': 'input',
+                        'block_id': 'resolution_block',
+                        'label': {'type': 'plain_text', 'text': '실제 조치 내용'},
+                        'element': {
+                            'type': 'plain_text_input',
+                            'action_id': 'resolution_input',
+                            'multiline': True,
+                            'placeholder': {
+                                'type': 'plain_text',
+                                'text': '실제로 수행한 조치 내용을 입력하세요...',
+                            },
+                        },
+                    },
+                ],
+            }
 
-                # AgentCore에 resolved 저장
-                try:
-                    AgentCoreMemory().save_incident({
-                        'alert_name': alert_name,
-                        'severity': ongoing.get('severity', 'high'),
-                        'root_cause': ongoing.get('root_cause', ''),
-                        'resolution': f'수동 해결 완료 by @{user_name}',
-                        'resolution_time': resolution_minutes,
-                        'status': 'resolved',
-                    })
-                except Exception as _e:
-                    print(f"⚠️ [AgentCore] 수동 resolved 저장 실패: {_e}")
-
-                # DynamoDB ongoing 삭제
-                delete_ongoing_incident(alert_name)
-
-                print(f'✅ 수동 resolved 처리 완료: {alert_name} ({resolution_minutes:.0f}분)')
-
-                # 원본 메시지를 복구 완료 메시지로 업데이트
-                from slack_templates import build_resolved_message
-                resolved_msg = build_resolved_message(
-                    alert_name=alert_name,
-                    resolution_minutes=resolution_minutes,
-                    root_cause=ongoing.get('root_cause', ''),
-                    resolved_by=f'@{user_name}'
-                )
-                resolved_msg['channel'] = channel_id
-                resolved_msg['ts'] = message_ts
-                _update_slack_message(resolved_msg)
+            if trigger_id:
+                _open_slack_modal(trigger_id, modal)
+                print(f'✅ 조치완료 모달 오픈: {alert_name}')
             else:
-                print(f'⚠️ DynamoDB에서 ongoing 인시던트 못 찾음: {alert_name}')
-                # ongoing 못 찾아도 메시지는 업데이트
-                from slack_templates import build_resolved_message
-                resolved_msg = build_resolved_message(
-                    alert_name=alert_name,
-                    resolution_minutes=0,
-                    root_cause='',
-                    resolved_by=f'@{user_name}'
-                )
-                resolved_msg['channel'] = channel_id
-                resolved_msg['ts'] = message_ts
-                _update_slack_message(resolved_msg)
+                print(f'⚠️ trigger_id 없음 → 모달 열기 실패: {alert_name}')
 
         # Slack에는 반드시 200 빠르게 응답해야 함 (3초 이내)
         return {

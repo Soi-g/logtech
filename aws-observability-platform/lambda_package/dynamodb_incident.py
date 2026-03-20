@@ -40,6 +40,7 @@ def get_ongoing_incident(alert_name: str) -> dict | None:
             'slack_ts': item.get('slack_ts', {}).get('S', ''),
             'slack_channel': item.get('slack_channel', {}).get('S', ''),
             'question': item.get('question', {}).get('S', ''),
+            'agentcore_record_id': item.get('agentcore_record_id', {}).get('S', ''),
             'status': 'ongoing',
         }
     except Exception as e:
@@ -75,6 +76,9 @@ def put_ongoing_incident(alert_name: str, incident_data: dict):
         # SNS 원문 저장 (분석 버튼 클릭 시 LangGraph에 전달)
         if incident_data.get('question'):
             item['question'] = {'S': incident_data['question'][:4000]}  # DynamoDB 크기 제한 고려
+        # AgentCore ongoing 레코드 ID (조치완료 시 삭제용)
+        if incident_data.get('agentcore_record_id'):
+            item['agentcore_record_id'] = {'S': incident_data['agentcore_record_id']}
 
         _get_client().put_item(TableName=TABLE_NAME, Item=item)
         print(f"✅ [DynamoDB] ongoing 저장: {alert_name}")

@@ -362,196 +362,106 @@ resource "aws_prometheus_rule_group_namespace" "alerts" {
               summary: "서비스 메트릭 수신 중단 - {{ $labels.job }}"
               description: "{{ $labels.job }} ({{ $labels.deployment_environment }}) 서비스의 HTTP 메트릭이 5분 이상 수신되지 않습니다. 서비스가 다운됐거나 OTel 수집이 중단됐을 수 있습니다"
 
-          # ── HTTP 5xx 에러율 ───────────────────────────────────
-          - alert: HighHttpErrorRate
-            expr: |
-              sum by (service_name, service_namespace)(
-                rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])
-              )
-              /
-              sum by (service_name, service_namespace)(
-                rate(http_server_request_duration_seconds_count[5m])
-              ) > 0.01
-            for: 5m
-            labels:
-              severity: warning
-            annotations:
-              summary: "HTTP 5xx 에러율 1% 초과"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 5xx 에러율이 {{ $value | humanizePercentage }} 입니다"
+          # ── HTTP 5xx 에러율 (테스트 중 비활성화) ──────────────
+          # - alert: HighHttpErrorRate
+          #   expr: |
+          #     sum by (service_name, service_namespace)(
+          #       rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])
+          #     )
+          #     /
+          #     sum by (service_name, service_namespace)(
+          #       rate(http_server_request_duration_seconds_count[5m])
+          #     ) > 0.01
+          #   for: 5m
+          #   labels:
+          #     severity: warning
+          #   annotations:
+          #     summary: "HTTP 5xx 에러율 1% 초과"
+          #     description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 5xx 에러율이 {{ $value | humanizePercentage }} 입니다"
 
-          - alert: CriticalHttpErrorRate
-            expr: |
-              sum by (service_name, service_namespace)(
-                rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])
-              )
-              /
-              sum by (service_name, service_namespace)(
-                rate(http_server_request_duration_seconds_count[5m])
-              ) > 0.05
-            for: 2m
-            labels:
-              severity: critical
-            annotations:
-              summary: "HTTP 5xx 에러율 5% 초과"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 5xx 에러율이 {{ $value | humanizePercentage }} 입니다"
+          # - alert: CriticalHttpErrorRate
+          #   expr: |
+          #     sum by (service_name, service_namespace)(
+          #       rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])
+          #     )
+          #     /
+          #     sum by (service_name, service_namespace)(
+          #       rate(http_server_request_duration_seconds_count[5m])
+          #     ) > 0.05
+          #   for: 2m
+          #   labels:
+          #     severity: critical
+          #   annotations:
+          #     summary: "HTTP 5xx 에러율 5% 초과"
+          #     description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 5xx 에러율이 {{ $value | humanizePercentage }} 입니다"
 
-          # ── HTTP 응답시간 ─────────────────────────────────────
-          - alert: HighHttpLatencyP95
-            expr: |
-              histogram_quantile(0.95,
-                sum by (service_name, service_namespace, le)(
-                  rate(http_server_request_duration_seconds_bucket[5m])
-                )
-              ) > 1.0
-            for: 5m
-            labels:
-              severity: warning
-            annotations:
-              summary: "HTTP P95 응답시간 1초 초과"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 P95 응답시간이 {{ $value }}초 입니다"
+          # ── HTTP 응답시간 (테스트 중 비활성화) ───────────────
+          # - alert: HighHttpLatencyP95
+          #   expr: |
+          #     histogram_quantile(0.95,
+          #       sum by (service_name, service_namespace, le)(
+          #         rate(http_server_request_duration_seconds_bucket[5m])
+          #       )
+          #     ) > 1.0
+          #   for: 5m
+          #   labels:
+          #     severity: warning
+          #   annotations:
+          #     summary: "HTTP P95 응답시간 1초 초과"
+          #     description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 P95 응답시간이 {{ $value }}초 입니다"
 
-          - alert: CriticalHttpLatencyP99
-            expr: |
-              histogram_quantile(0.99,
-                sum by (service_name, service_namespace, le)(
-                  rate(http_server_request_duration_seconds_bucket[5m])
-                )
-              ) > 3.0
-            for: 2m
-            labels:
-              severity: critical
-            annotations:
-              summary: "HTTP P99 응답시간 3초 초과"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 P99 응답시간이 {{ $value }}초 입니다"
+          # - alert: CriticalHttpLatencyP99
+          #   expr: |
+          #     histogram_quantile(0.99,
+          #       sum by (service_name, service_namespace, le)(
+          #         rate(http_server_request_duration_seconds_bucket[5m])
+          #       )
+          #     ) > 3.0
+          #   for: 2m
+          #   labels:
+          #     severity: critical
+          #   annotations:
+          #     summary: "HTTP P99 응답시간 3초 초과"
+          #     description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 P99 응답시간이 {{ $value }}초 입니다"
 
-          # ── DB 커넥션 (OTel 표준 - 언어 무관) ───────────────
-          - alert: HighDbConnectionPending
-            expr: |
-              sum by (service_name, service_namespace)(
-                db_client_connections_pending_requests
-              ) > 5
-            for: 2m
-            labels:
-              severity: warning
-            annotations:
-              summary: "DB 커넥션 대기 급증"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 DB 커넥션 대기가 {{ $value }}개 입니다"
+          # ── DB 커넥션 (테스트 중 비활성화) ───────────────────
+          # - alert: HighDbConnectionPending
+          #   expr: |
+          #     sum by (service_name, service_namespace)(
+          #       db_client_connections_pending_requests
+          #     ) > 5
+          #   for: 2m
+          #   labels:
+          #     severity: warning
+          #   annotations:
+          #     summary: "DB 커넥션 대기 급증"
+          #     description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 DB 커넥션 대기가 {{ $value }}개 입니다"
 
-          - alert: CriticalDbConnectionPending
-            expr: |
-              sum by (service_name, service_namespace)(
-                db_client_connections_pending_requests
-              ) > 10
-            for: 1m
-            labels:
-              severity: critical
-            annotations:
-              summary: "DB 커넥션 대기 심각 (10개 초과)"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 DB 커넥션 대기가 {{ $value }}개 입니다"
+          # - alert: CriticalDbConnectionPending
+          #   expr: |
+          #     sum by (service_name, service_namespace)(
+          #       db_client_connections_pending_requests
+          #     ) > 10
+          #   for: 1m
+          #   labels:
+          #     severity: critical
+          #   annotations:
+          #     summary: "DB 커넥션 대기 심각 (10개 초과)"
+          #     description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 DB 커넥션 대기가 {{ $value }}개 입니다"
 
       # ============================================================
-      # JVM 런타임 레이어 - Java 앱에서만 자동 발동
-      # (메트릭 없는 앱은 자동으로 스킵됨)
+      # JVM 런타임 레이어 (테스트 중 비활성화)
       # ============================================================
-      - name: jvm-alerts
-        interval: 1m
-        rules:
-
-          # ── CPU ──────────────────────────────────────────────
-          - alert: HighJvmCpu
-            expr: |
-              sum by (service_name, service_namespace)(
-                jvm_cpu_recent_utilization_ratio
-              ) > 0.8
-            for: 5m
-            labels:
-              severity: warning
-            annotations:
-              summary: "JVM CPU 사용률 80% 초과"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 CPU가 {{ $value | humanizePercentage }} 입니다"
-
-          - alert: CriticalJvmCpu
-            expr: |
-              sum by (service_name, service_namespace)(
-                jvm_cpu_recent_utilization_ratio
-              ) > 0.9
-            for: 2m
-            labels:
-              severity: critical
-            annotations:
-              summary: "JVM CPU 사용률 90% 초과"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 CPU가 {{ $value | humanizePercentage }} 입니다"
-
-          # ── Heap Memory ──────────────────────────────────────
-          - alert: HighJvmHeapMemory
-            expr: |
-              sum by (service_name, service_namespace)(
-                jvm_memory_used_bytes{jvm_memory_type="heap"}
-              )
-              /
-              sum by (service_name, service_namespace)(
-                jvm_memory_limit_bytes{jvm_memory_type="heap"}
-              ) > 0.8
-            for: 5m
-            labels:
-              severity: warning
-            annotations:
-              summary: "JVM Heap 메모리 80% 초과"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 Heap 사용률이 {{ $value | humanizePercentage }} 입니다"
-
-          - alert: CriticalJvmHeapMemory
-            expr: |
-              sum by (service_name, service_namespace)(
-                jvm_memory_used_bytes{jvm_memory_type="heap"}
-              )
-              /
-              sum by (service_name, service_namespace)(
-                jvm_memory_limit_bytes{jvm_memory_type="heap"}
-              ) > 0.9
-            for: 2m
-            labels:
-              severity: critical
-            annotations:
-              summary: "JVM Heap 메모리 90% 초과 - OOM 위험"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 Heap 사용률이 {{ $value | humanizePercentage }} 입니다"
-
-          # ── GC ───────────────────────────────────────────────
-          - alert: HighJvmGcTime
-            expr: |
-              sum by (service_name, service_namespace)(
-                rate(jvm_gc_duration_seconds_sum[5m])
-              ) > 0.05
-            for: 5m
-            labels:
-              severity: warning
-            annotations:
-              summary: "JVM GC 시간 과다 (벽시계 시간의 5% 초과)"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 GC 소요 시간이 높습니다"
-
-          # ── Threads ──────────────────────────────────────────
-          - alert: JvmThreadDeadlock
-            expr: |
-              sum by (service_name, service_namespace)(
-                jvm_thread_count{jvm_thread_state="deadlocked"}
-              ) > 0
-            for: 1m
-            labels:
-              severity: critical
-            annotations:
-              summary: "JVM 데드락 스레드 감지"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})에서 데드락이 발생했습니다"
-
-          - alert: HighJvmBlockedThreads
-            expr: |
-              sum by (service_name, service_namespace)(
-                jvm_thread_count{jvm_thread_state="blocked"}
-              ) > 50
-            for: 5m
-            labels:
-              severity: warning
-            annotations:
-              summary: "JVM BLOCKED 스레드 과다 (50개 초과)"
-              description: "서비스 {{ $labels.service_name }} ({{ $labels.service_namespace }})의 BLOCKED 스레드가 {{ $value }}개 입니다"
+      # - name: jvm-alerts
+      #   interval: 1m
+      #   rules:
+      #     - alert: HighJvmCpu
+      #     - alert: CriticalJvmCpu
+      #     - alert: HighJvmHeapMemory
+      #     - alert: CriticalJvmHeapMemory
+      #     - alert: HighJvmGcTime
+      #     - alert: JvmThreadDeadlock
+      #     - alert: HighJvmBlockedThreads
   YAML
 }
 

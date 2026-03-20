@@ -715,6 +715,7 @@ cat > /home/ubuntu/chatbot/requirements.txt << 'REQEOF'
 fastapi==0.115.0
 uvicorn>=0.31.1
 strands-agents==1.28.0
+strands-agents-tools==0.2.21
 boto3==1.42.60
 langchain-aws==1.3.1
 pydantic>=2.10.6
@@ -733,6 +734,9 @@ DYNAMODB_INCIDENT_TABLE=${project_name}-incident-ongoing
 AWS_REGION_NAME=${aws_region}
 BEDROCK_MODEL_ID=us.anthropic.claude-3-5-haiku-20241022-v1:0
 AGENTCORE_MEMORY_ID=${agentcore_memory_id}
+DEPLOY_BUCKET=${deploy_bucket}
+CHATBOT_CONVERSATIONS_TABLE=${chatbot_conversations_table}
+CHATBOT_MESSAGES_TABLE=${chatbot_messages_table}
 ATHENA_DATABASE=${project_name_underscore}_observability
 ATHENA_OUTPUT_BUCKET=s3://${athena_results_bucket}/chatbot-queries/
 LOGS_BUCKET=${logs_bucket}
