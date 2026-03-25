@@ -1,20 +1,4 @@
-# AWS Observability Platform — 파일 구조 및 역할
-
-## 전체 아키텍처
-
-고객 앱 EC2 (Frontend/Backend)
-└─ OTel Collector Agent (sidecar)
-└─ Gateway EC2 (OTel Collector Gateway)
-├─ AMP (Prometheus)        ← 메트릭
-├─ OpenSearch              ← 로그 / 트레이스
-└─ S3                      ← 백업
-
-Alertmanager ──► SNS ──► Lambda (진입점)
-└─ AgentCore Runtime (Docker)
-└─ RCA 엔진 (LangGraph)
-└─ Slack
-
-
+# AWS Observability Platform
 
 ---
 
