@@ -292,6 +292,7 @@ services:
       - OTEL_LOGS_EXPORTER=otlp
       - OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=todolist,deployment.environment=${environment},service.name=flask
+      - OTEL_SEMCONV_STABILITY_OPT_IN=http
 
   todoui-thymeleaf:
     image: ghcr.io/lftraining/lfs148-code-todoui-thymeleaf:v2404

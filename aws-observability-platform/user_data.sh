@@ -86,15 +86,15 @@ processors:
     log_statements:
       - context: resource
         statements:
-          - set(attributes["service.name"], Trim(attributes["service.name"]))
+          - set(attributes["service.name"], Trim(attributes["service.name"])) where attributes["service.name"] != nil
     metric_statements:
       - context: resource
         statements:
-          - set(attributes["service.name"], Trim(attributes["service.name"]))
+          - set(attributes["service.name"], Trim(attributes["service.name"])) where attributes["service.name"] != nil
     trace_statements:
       - context: resource
         statements:
-          - set(attributes["service.name"], Trim(attributes["service.name"]))
+          - set(attributes["service.name"], Trim(attributes["service.name"])) where attributes["service.name"] != nil
 
   transform/fix_hostlog_timestamp:
     error_mode: ignore
