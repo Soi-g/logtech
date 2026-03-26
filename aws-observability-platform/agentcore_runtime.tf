@@ -162,7 +162,7 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
 # Lambda에 AgentCore Runtime invoke 권한 추가
 resource "aws_iam_role_policy" "lambda_agentcore_invoke" {
   name = "${var.project_name}-lambda-agentcore-invoke"
-  role = aws_iam_role.lambda_agent.id
+  role = module.alerting.lambda_agent_role_id
 
   policy = jsonencode({
     Version = "2012-10-17"

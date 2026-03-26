@@ -20,7 +20,7 @@
 
 resource "aws_iam_role_policy" "lambda_agentcore_memory" {
   name = "${var.project_name}-lambda-agentcore-memory-policy"
-  role = aws_iam_role.lambda_agent.id
+  role = module.alerting.lambda_agent_role_id
 
   policy = jsonencode({
     Version = "2012-10-17"

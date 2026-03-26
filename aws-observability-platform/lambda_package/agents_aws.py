@@ -54,20 +54,51 @@ AMP_SCHEMA = """
 ## AMP(Prometheus) 메트릭 스키마
 
 ### 라벨 규칙
-- job 라벨 = service.name/service.namespace 조합 (예: job="todolist/springboot", job="todolist/todoui-flask", job="todolist/thymeleaf")
+- job 라벨 = service.name/service.namespace 조합 (예: job="todolist/springboot", job="todolist/flask", job="todolist/thymeleaf")
+- Flask job 이름: "todolist/flask" (todoui-flask 아님)
 - job="springboot" 단독은 존재하지 않음. 반드시 "todolist/springboot" 등 전체값 사용.
 - deployment_environment: "dev" = VM/Docker, "prod" = EC2/AWS
+- source: 데이터 수집 경로 구분 — "app"(OTLP/앱 SDK), "container"(docker_stats), "host"(hostmetrics), "sys"(syslog)
+  - http_server_request_duration_seconds_count 등 앱 메트릭은 source="app" 고정
+  - 파생 메트릭(job:http_4xx_error_ratio:rate5m 등)에도 source 라벨 보존됨
 - 반드시 job 라벨로 서비스를 필터할 것. service_name 라벨은 존재하지 않음.
 
 ### 파생 메트릭 (Recording Rules — 우선 사용)
-app:   app_http_server_requests_5m, app_http_server_errors_5m,
-       app_http_server_error_ratio_5m, app_http_server_latency_p95_5m
+http:  job:http_4xx_error_ratio:rate5m       (4xx 에러율, job+deployment_environment+source 라벨)
+       job:http_5xx_error_ratio:rate5m       (5xx 에러율, job+deployment_environment+source 라벨)
+app:   app_http_server_requests_5m           (총 요청 수)
+       app_http_server_5xx_errors_5m         (5xx 에러 건수)
+       app_http_server_4xx_errors_5m         (4xx 에러 건수)
+       app_http_server_5xx_error_ratio_5m    (5xx 에러율)
+       app_http_server_4xx_error_ratio_5m    (4xx 에러율)
+       app_http_server_latency_p95_5m        (P95 응답시간)
+  ※ 모든 app_* 파생 메트릭은 source, deployment_environment, service_namespace 라벨 포함
 infra: app_container_cpu_utilization_avg_5m, app_container_memory_utilization_avg_5m
 jvm:   app_jvm_cpu_utilization_avg_5m, app_jvm_memory_used_avg_5m,
        app_jvm_gc_count_5m, app_jvm_gc_duration_p95_5m
 
+### 4xx vs 5xx 해석 기준
+- 4xx 에러율 상승 + 5xx 정상 → 클라이언트 잘못된 요청 (False Positive 가능성)
+- 5xx 에러율 상승 → 서버/인프라 장애 가능성, 추가 조사 필요
+- 두 지표 모두 조회해서 비교할 것
+
+### http_route 라벨 — 4xx/5xx 원인 경로 드릴다운
+- http_server_request_duration_seconds_count에는 http_route, http_response_status_code 라벨 존재
+- 4xx/5xx 알람 발생 시 반드시 route별 분석으로 어떤 경로에서 에러가 나는지 특정할 것
+- 드릴다운 쿼리 (job 값은 실제 서비스에 맞게 변경):
+  topk(5, sum by (http_route, http_response_status_code)(
+    rate(http_server_request_duration_seconds_count{job="...", http_response_status_code=~"4.."}[5m])
+  ))
+- 해석 기준:
+  - 특정 route에만 4xx 집중 → 해당 경로 문제 (없는 경로 요청, 인증 오류 등)
+  - 모든 route에 고르게 4xx → 공통 미들웨어/인증/설정 문제
+  - 404가 대부분 → 존재하지 않는 경로 요청 (클라이언트 버그, 잘못된 URL)
+  - 401/403 → 인증/권한 문제
+  - 400 → 잘못된 요청 형식
+
 ### Raw 메트릭 (파생 없을 때)
-http:      http_server_request_duration_seconds_count, http_server_request_duration_seconds_bucket
+http:      http_server_request_duration_seconds_count{http_route, http_response_status_code 라벨 포함}
+           http_server_request_duration_seconds_bucket
 jvm:       jvm_memory_used_bytes, jvm_thread_count, jvm_gc_duration_seconds_bucket
 container: container_cpu_utilization_ratio, container_memory_usage_total_bytes
 db:        db_client_connections_usage, db_client_connections_max
@@ -632,9 +663,15 @@ Data sources:
 1. AMP (OTel metrics) — fetch_amp_metric
    - App/container/host/JVM metrics from OTel collector
    - Environment label: deployment_environment="dev" (VM/Docker) or deployment_environment="prod" (EC2/AWS)
-   - Job label = service name (전체값 사용): job="todolist/springboot", job="todolist/thymeleaf", job="todolist/todoui-flask"
+   - Job label = service name (전체값 사용): job="todolist/springboot", job="todolist/thymeleaf", job="todolist/flask"
    - job="springboot" 단독은 AMP에 존재하지 않음. 반드시 "todolist/springboot" 등 전체값 사용.
-   - 파생 메트릭 우선 사용 (app_http_server_error_ratio_5m 등), 없으면 raw 메트릭 시도
+   - 파생 메트릭 우선 사용, 없으면 raw 메트릭 시도
+   - 파생 메트릭 목록 (우선순위 순):
+     app_http_server_5xx_error_ratio_5m, app_http_server_4xx_error_ratio_5m
+     app_http_server_5xx_errors_5m, app_http_server_4xx_errors_5m
+     app_http_server_requests_5m, app_http_server_latency_p95_5m
+     app_jvm_cpu_utilization_avg_5m, app_jvm_memory_used_avg_5m
+     app_container_cpu_utilization_avg_5m, app_container_memory_utilization_avg_5m
 
 2. CloudWatch — fetch_cloudwatch_metric
    - AWS 관리형 서비스 메트릭 (RDS, EC2)
@@ -645,12 +682,13 @@ Data sources:
    - 현재 ALARM 상태인 알람 목록 확인 시 사용
 
 Decision rules:
-- OTel 앱/JVM/컨테이너 메트릭 → fetch_amp_metric
+- OTel 앱/JVM/컨테이너 메트릭 → fetch_amp_metric (파생 메트릭 먼저)
 - RDS/EC2 AWS-level 메트릭 → fetch_cloudwatch_metric
 - AMP 빈 결과 + prod 환경 → CloudWatch도 시도
 - "현재 알람" 또는 "어떤 알람 발생 중" → fetch_cloudwatch_alarms
 
-Always return actual numeric values with units."""
+LIMIT: 최대 2회 tool 호출. 2회 안에 핵심 수치를 확보하고 결과를 반환하라.
+Always return actual numeric values with units. (max 800 tokens)"""
 
 
 LOGS_AGENT_PROMPT = """You are a Logs & Traces Specialist. Retrieve and summarize log and trace data.
@@ -673,9 +711,12 @@ Tools:
    - Lambda 로그: "/aws/lambda/{function-name}"
 
 Key rules:
-- 로그 0건이면 last_minutes 늘려서 재시도 (10 → 30 → 60)
+- 로그 0건이면 last_minutes 늘려서 재시도 1회만 허용 (10 → 30)
 - logs-host의 인프라/OS 로그는 무시하고 앱 로그만 보고할 것
-- RDS 내부 에러 로그 확인 시 → fetch_cloudwatch_logs 사용"""
+- RDS 내부 에러 로그 확인 시 → fetch_cloudwatch_logs 사용
+
+LIMIT: 최대 3회 tool 호출. 3회 안에 핵심 로그/트레이스를 확보하고 결과를 반환하라.
+Return concise summary. (max 800 tokens)"""
 
 
 INFRASTRUCTURE_AGENT_PROMPT = """You are an Infrastructure Specialist. Check current state and history of AWS resources.
@@ -706,14 +747,15 @@ CloudTrail 활용 예시:
 - RDS 변경: event_names="ModifyDBInstance,RebootDBInstance"
 - EC2 재시작: event_names="StopInstances,StartInstances,RebootInstances"
 
-Conclude HEALTHY or UNHEALTHY with specific evidence."""
+LIMIT: 최대 3회 tool 호출. 요청된 리소스만 확인하고 결과를 반환하라. 광범위 스캔 금지.
+Conclude HEALTHY or UNHEALTHY with specific evidence. (max 1000 tokens)"""
 
 
 # ============================================================
 # Strands 모델
 # ============================================================
 _model = BedrockModel(
-    model_id=os.environ.get("ANALYSIS_MODEL_ID", "apac.anthropic.claude-sonnet-4-20250514-v1:0"),
+    model_id=os.environ.get("ANALYSIS_MODEL_ID", "global.anthropic.claude-haiku-4-5-20251001-v1:0"),
     region_name=AWS_REGION,
     streaming=False,
 )

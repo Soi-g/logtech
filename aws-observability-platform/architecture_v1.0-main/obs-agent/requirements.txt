@@ -1,5 +1,0 @@
-botocore
-boto3
-opensearch-py
-requests
-

@@ -75,7 +75,7 @@ def put_ongoing_incident(alert_name: str, incident_data: dict):
             item['slack_channel'] = {'S': incident_data['slack_channel']}
         # SNS 원문 저장 (분석 버튼 클릭 시 LangGraph에 전달)
         if incident_data.get('question'):
-            item['question'] = {'S': incident_data['question'][:4000]}  # DynamoDB 크기 제한 고려
+            item['question'] = {'S': incident_data['question'][:4000]}
         # AgentCore ongoing 레코드 ID (조치완료 시 삭제용)
         if incident_data.get('agentcore_record_id'):
             item['agentcore_record_id'] = {'S': incident_data['agentcore_record_id']}

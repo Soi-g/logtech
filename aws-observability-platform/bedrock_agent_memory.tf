@@ -26,7 +26,7 @@ resource "aws_dynamodb_table" "incident_ongoing" {
 
 resource "aws_iam_role_policy" "lambda_dynamodb_incident" {
   name = "${var.project_name}-lambda-dynamodb-incident-policy"
-  role = aws_iam_role.lambda_agent.id
+  role = module.alerting.lambda_agent_role_id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -49,7 +49,7 @@ resource "aws_iam_role_policy" "lambda_dynamodb_incident" {
 # ============================================================
 resource "aws_bedrockagent_agent" "observability" {
   agent_name              = "${var.project_name}-observability-agent"
-  agent_resource_role_arn = aws_iam_role.bedrock_agent.arn
+  agent_resource_role_arn = module.observability.bedrock_agent_role_arn
   foundation_model        = "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
 
   description = "AWS 옵저버빌리티 플랫폼 AI 에이전트 - 장애 분석 및 대응"
@@ -132,7 +132,7 @@ resource "aws_bedrockagent_agent_alias" "prod" {
 # ============================================================
 resource "aws_iam_role_policy" "lambda_aoss_incident_memory" {
   name = "${var.project_name}-lambda-aoss-incident-memory-policy"
-  role = aws_iam_role.lambda_agent.id
+  role = module.alerting.lambda_agent_role_id
 
   policy = jsonencode({
     Version = "2012-10-17"

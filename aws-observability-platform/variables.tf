@@ -66,6 +66,12 @@ variable "agentcore_memory_id" {
   default     = ""
 }
 
+variable "agentcore_runtime_arn" {
+  description = "AgentCore Runtime ARN (비어있으면 Lambda에서 직접 실행)"
+  type        = string
+  default     = ""
+}
+
 # variable "slack_webhook_url" {
 #   description = "Slack Webhook URL for alerts"
 #   type        = string

@@ -10,10 +10,14 @@ import json
 import boto3
 import urllib.request
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+KST = timezone(timedelta(hours=9))
+def _now_kst() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
 
 # LangGraph 임포트
-from graph_agent_with_memory import build_graph
+from graph_agent_with_memory import build_graph, lookup_memory
 
 # AgentCore Memory 임포트
 from agentcore_memory import AgentCoreMemory
@@ -29,6 +33,9 @@ from slack_templates import (
     build_alert_message,
     build_simple_alert_message,
     build_incident_report_message,
+    build_analysis_append_blocks,
+    build_resolved_append_blocks,
+    SEVERITY_COLOR,
     IncidentReport,
     RunbookReference
 )
@@ -77,236 +84,6 @@ SLACK_CHANNEL = os.environ.get('SLACK_CHANNEL')
 
 
 # ============================================================
-# Strands Agents로 데이터 수집
-# ============================================================
-def collect_observability_data(question: str) -> dict:
-    """
-    Strands Agents를 사용하여 메트릭/로그/트레이스 수집
-    """
-    print(f"📊 Strands Agents로 데이터 수집 중...")
-    
-    results = {}
-    
-    try:
-        # 메트릭 수집
-        print(f"  - Metrics Agent 실행")
-        metrics_result = metrics_agent(question)
-        results['metrics'] = str(metrics_result)
-    except Exception as e:
-        print(f"  ⚠️ Metrics 수집 실패: {e}")
-        results['metrics'] = f"수집 실패: {e}"
-    
-    try:
-        # 로그 수집
-        print(f"  - Logs Agent 실행")
-        logs_result = logs_agent(question)
-        results['logs'] = str(logs_result)
-    except Exception as e:
-        print(f"  ⚠️ Logs 수집 실패: {e}")
-        results['logs'] = f"수집 실패: {e}"
-    
-    try:
-        # 트레이스 수집
-        print(f"  - Traces Agent 실행")
-        traces_result = traces_agent(question)
-        results['traces'] = str(traces_result)
-    except Exception as e:
-        print(f"  ⚠️ Traces 수집 실패: {e}")
-        results['traces'] = f"수집 실패: {e}"
-    
-    print(f"✅ 데이터 수집 완료")
-    return results
-
-
-# ============================================================
-# Bedrock Agent 호출
-# ============================================================
-def invoke_agent(alert_name: str, alert_description: str, severity: str = "medium") -> dict:
-    """
-    Bedrock Agent Runtime 호출
-    
-    Args:
-        alert_name: 알람명
-        alert_description: 알람 설명
-        severity: 심각도
-    
-    Returns:
-        Agent 응답 결과
-    """
-    
-    # 1. 과거 이력 조회
-    memory = IncidentMemory()
-    stats = memory.get_stats(alert_name)
-    similar = memory.search_similar_incidents(alert_name, limit=3)
-
-    # 1-1. 런북 직접 검색
-    runbooks = search_runbooks(alert_name)
-    
-    # 2. 컨텍스트 구성
-    context = f"""
-🚨 알람 발생
-알람명: {alert_name}
-심각도: {severity}
-설명: {alert_description}
-
-📊 과거 장애 이력:
-"""
-    
-    if stats['is_new']:
-        context += "⚠️ 신규 장애 패턴 (과거 이력 없음)\n"
-    else:
-        context += f"""
-✅ 과거 {stats['count']}회 발생
-📈 평균 해결 시간: {stats['avg_resolution_time']:.1f}분
-🔍 가장 흔한 원인: {stats['most_common_cause']}
-
-최근 3건:
-"""
-        for idx, incident in enumerate(similar[:3], 1):
-            context += f"""
-{idx}. {incident['timestamp']}
-   원인: {incident.get('root_cause', 'Unknown')}
-   해결: {incident.get('resolution', 'Unknown')}
-   소요: {incident.get('resolution_time_minutes', 0)}분
-"""
-    
-    context += """
-
-📚 관련 런북:
-{runbook_context}
-
-📋 분석 요청:
-1. 위 런북 내용을 참고하여 근본 원인 파악
-2. 과거 이력을 참조하여 빠른 해결 방법 제시
-3. 즉시 조치 및 후속 조치 권장
-
-반드시 아래 JSON 형식으로만 응답하세요 (다른 텍스트 없이):
-{{
-  "incident_summary": "한 문장 요약",
-  "is_recurring": true/false,
-  "past_occurrences": 숫자,
-  "likely_root_causes": ["원인1", "원인2"],
-  "severity": "심각도",
-  "impact": "영향 범위",
-  "immediate_actions": ["즉시 조치1", "즉시 조치2"],
-  "follow_up_actions": ["후속 조치1"],
-  "evidence_summary": ["근거1", "근거2"],
-  "runbook_references": [
-    {{"title": "런북파일명.md", "summary": "핵심 대응 절차"}}
-  ]
-}}
-
-⚠️ 주의: runbook_references에는 위 런북 섹션에서 제공된 런북만 포함하세요. 런북이 없으면 빈 배열 []로 두세요.
-"""
-    
-    # 2-1. 런북 컨텍스트 구성
-    if runbooks:
-        runbook_context = ""
-        for rb in runbooks:
-            runbook_context += f"[{rb['title']}]\n{rb['content']}\n\n"
-    else:
-        runbook_context = "검색된 런북 없음"
-    context = context.replace("{runbook_context}", runbook_context)
-
-    # 3. 세션 ID 생성 (공백 제거)
-    session_id = f"incident-{alert_name.replace(' ', '-')}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-    
-    print(f"🤖 Bedrock Agent 호출 시작")
-    print(f"   Agent ID: {AGENT_ID}")
-    print(f"   Session ID: {session_id}")
-    print(f"   과거 이력: {stats['count']}건")
-    
-    try:
-        # 4. Agent 호출
-        response = bedrock_agent_runtime.invoke_agent(
-            agentId=AGENT_ID,
-            agentAliasId=AGENT_ALIAS_ID,
-            sessionId=session_id,
-            enableTrace=True,
-            inputText=context
-        )
-        
-        # 5. 응답 스트림 처리
-        result_text = ""
-        trace_data = []
-        
-        for event in response['completion']:
-            if 'chunk' in event:
-                chunk = event['chunk']
-                if 'bytes' in chunk:
-                    result_text += chunk['bytes'].decode('utf-8')
-            
-            if 'trace' in event:
-                trace_data.append(event['trace'])
-        
-        print(f"✅ Agent 응답 완료 ({len(result_text)} 글자)")
-        
-        # 6. JSON 파싱 (개선된 로직)
-        try:
-            # 1단계: 마크다운 코드 블록 제거
-            cleaned_text = result_text.strip()
-            
-            if '```json' in cleaned_text:
-                cleaned_text = cleaned_text.split('```json')[1].split('```')[0].strip()
-            elif '```' in cleaned_text:
-                cleaned_text = cleaned_text.split('```')[1].split('```')[0].strip()
-            
-            # 2단계: JSON 객체 추출 (중괄호 기준)
-            if '{' in cleaned_text and '}' in cleaned_text:
-                start_idx = cleaned_text.find('{')
-                end_idx = cleaned_text.rfind('}') + 1
-                cleaned_text = cleaned_text[start_idx:end_idx]
-            
-            # 3단계: JSON 파싱
-            report = json.loads(cleaned_text)
-            print(f"✅ JSON 파싱 성공")
-            
-            # runbook_references가 비어있으면 직접 채움
-            if not report.get("runbook_references") and runbooks:
-                seen = set()
-                unique_runbooks = []
-                for rb in runbooks:
-                    if rb["title"] not in seen:
-                        seen.add(rb["title"])
-                        unique_runbooks.append(rb)
-                report["runbook_references"] = [
-                    {"title": rb["title"], "summary": rb["title"].replace(".md", "") + " 런북 참조"}
-                    for rb in unique_runbooks
-                ]
-                print(f"📚 runbook_references 직접 주입: {len(runbooks)}건")
-            
-        except json.JSONDecodeError as e:
-            print(f"⚠️ JSON 파싱 실패: {e}")
-            print(f"   원본 텍스트 (처음 500자): {result_text[:500]}")
-            
-            # Fallback: 텍스트 응답을 구조화
-            report = {
-                "incident_summary": f"{alert_name} 알람 발생 - AI 분석 완료",
-                "is_recurring": not stats['is_new'],
-                "past_occurrences": stats['count'],
-                "likely_root_causes": [stats.get('most_common_cause', '분석 필요')],
-                "severity": severity,
-                "impact": "영향 범위 파악 중",
-                "immediate_actions": ["시스템 로그 확인", "담당자 호출"],
-                "follow_up_actions": ["근본 원인 분석"],
-                "evidence_summary": [f"AI 응답: {result_text[:200]}..."],
-                "runbook_references": [],
-                "raw_response": result_text  # 원본 응답 포함
-            }
-        
-        return {
-            'session_id': session_id,
-            'report': report,
-            'stats': stats,
-            'trace': trace_data[:5] if trace_data else []  # 처음 5개만
-        }
-        
-    except Exception as e:
-        print(f"❌ Agent 호출 실패: {e}")
-        raise
-
-
-# ============================================================
 # Slack 전송
 # ============================================================
 def send_to_slack(alert_name: str, result: dict, message_ts: str = None, channel: str = None):
@@ -323,16 +100,13 @@ def send_to_slack(alert_name: str, result: dict, message_ts: str = None, channel
     report_dict = result['report']
     stats = result['stats']
     session_id = result['session_id']
-    
-    # 재발 여부 표시
-    if stats['is_new']:
-        history_info = "⚠️ 신규 장애 패턴"
-    else:
-        history_info = f"🔄 재발 ({stats['count']}회 발생, 평균 {stats['avg_resolution_time']:.0f}분 소요)"
+    similar = result.get('similar', [])
+
+    # history_info는 초기 알람 메시지에 이미 포함되므로 분석 결과에는 제외
+    history_info = ''
     
     # IncidentReport 객체 생성
     try:
-        # RunbookReference 객체 생성
         runbook_refs = []
         for rb in report_dict.get('runbook_references', []):
             runbook_refs.append(RunbookReference(
@@ -340,52 +114,51 @@ def send_to_slack(alert_name: str, result: dict, message_ts: str = None, channel
                 section=rb.get('section', ''),
                 relevance=rb.get('summary', rb.get('relevance', ''))
             ))
-        
+
         incident_report = IncidentReport(
             incident_summary=report_dict.get('incident_summary', 'N/A'),
             likely_root_causes=report_dict.get('likely_root_causes', []),
-            severity=report_dict.get('severity', 'medium'),
+            severity=report_dict.get('severity', 'medium').lower(),
             impact=report_dict.get('impact', 'N/A'),
             immediate_actions=report_dict.get('immediate_actions', []),
             follow_up_actions=report_dict.get('follow_up_actions', []),
             evidence_summary=report_dict.get('evidence_summary', []),
             runbook_references=runbook_refs
         )
-        
-        # 알람 정보 (과거 이력 포함)
-        alert_info = f"{alert_name}\n{history_info}"
-        
-        # Slack 메시지 생성
-        message = build_incident_report_message(
-            alert_info=alert_info,
-            report=incident_report,
-            detected_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-        )
-        
-        # 채널 추가
-        message['channel'] = target_channel
-        
-        # 메시지 업데이트인 경우 ts 추가
+
         if message_ts:
-            message['ts'] = message_ts
-        
-        # 세션 정보 추가 (컨텍스트에)
-        if message.get('attachments') and message['attachments'][0].get('blocks'):
-            blocks = message['attachments'][0]['blocks']
-            # 마지막 context 블록 수정
-            for block in reversed(blocks):
-                if block.get('type') == 'context':
-                    block['elements'][0]['text'] += f" | Session: `{session_id}`"
-                    break
-        
-        if message_ts:
-            _update_slack_message(message)
+            # ── append 모드: 현재 메시지 블록 유지 + 분석 결과 append ──
+            color, curr_blocks = _get_slack_message_attachment(target_channel, message_ts)
+            base_blocks = _strip_action_and_status_blocks(curr_blocks)
+            append_blocks = build_analysis_append_blocks(
+                alert_name=alert_name,
+                report=incident_report,
+                history_info=history_info,
+                session_id=session_id,
+            )
+            new_color = SEVERITY_COLOR.get(incident_report.severity, color)
+            _update_slack_message({
+                'channel': target_channel,
+                'ts': message_ts,
+                'attachments': [{'color': new_color, 'blocks': base_blocks + append_blocks}]
+            })
+            # root_cause DynamoDB 업데이트
+            root_cause = ', '.join(report_dict.get('likely_root_causes', []))
+            if root_cause:
+                update_ongoing_root_cause(alert_name, root_cause)
         else:
+            # ── 새 메시지 모드 (fallback) ──
+            alert_info = f"{alert_name}\n{history_info}"
+            message = build_incident_report_message(
+                alert_info=alert_info,
+                report=incident_report,
+                detected_at=_now_kst()
+            )
+            message['channel'] = target_channel
             _send_slack_message(message)
-        
+
     except Exception as e:
         print(f"⚠️ Slack 템플릿 생성 실패: {e}")
-        # Fallback: 간단한 메시지
         fallback_message = {
             "channel": target_channel,
             "text": f"🚨 {alert_name}\n\n{report_dict.get('incident_summary', 'N/A')}"
@@ -506,6 +279,47 @@ def _open_slack_modal(trigger_id: str, modal: dict):
         print(f"❌ Slack 모달 오류: {e}")
 
 
+def _get_slack_message_attachment(channel: str, ts: str) -> tuple:
+    """conversations.history로 메시지 attachments 조회. (color, blocks) 반환."""
+    params = urllib.parse.urlencode({'channel': channel, 'latest': ts, 'limit': 1, 'inclusive': 'true'})
+    req = urllib.request.Request(
+        f'https://slack.com/api/conversations.history?{params}',
+        headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {SLACK_BOT_TOKEN}'}
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read())
+            print(f"[conversations.history] ok={result.get('ok')} error={result.get('error')} channel={channel} ts={ts}")
+            if not result.get('ok'):
+                print(f"⚠️ conversations.history 실패: {result.get('error')}")
+                return '#AAAAAA', []
+            messages = result.get('messages', [])
+            if not messages:
+                print(f"⚠️ conversations.history: 메시지 없음")
+                return '#AAAAAA', []
+            att = messages[0].get('attachments', [{}])[0]
+            blocks = att.get('blocks', [])
+            print(f"[conversations.history] 블록 {len(blocks)}개 조회 성공")
+            return att.get('color', '#AAAAAA'), blocks
+    except Exception as e:
+        print(f"⚠️ conversations.history 오류: {e}")
+    return '#AAAAAA', []
+
+
+def _strip_action_and_status_blocks(blocks: list) -> list:
+    """actions 블록과 '분석 중' / 'AI 분석이 필요하면' 안내 context 블록 제거."""
+    result = []
+    for b in blocks:
+        if b.get('type') == 'actions':
+            continue
+        if b.get('type') == 'context':
+            text = b.get('elements', [{}])[0].get('text', '')
+            if '분석 중' in text or '분석이 필요' in text:
+                continue
+        result.append(b)
+    return result
+
+
 def _update_slack_message(message: dict):
     """Slack 메시지 업데이트"""
     import urllib.request
@@ -603,17 +417,20 @@ def _handle_slack_interaction(event: dict) -> dict:
                 from graph_agent_with_memory import save_resolution
                 save_resolution(alert_name, actual_resolution, resolution_minutes)
 
-                # Slack 메시지 resolved로 업데이트
-                from slack_templates import build_resolved_message
-                resolved_msg = build_resolved_message(
+                # 현재 메시지 블록 유지 + 조치완료 블록 append
+                color, curr_blocks = _get_slack_message_attachment(channel_id, message_ts)
+                base_blocks = _strip_action_and_status_blocks(curr_blocks)
+                resolved_blocks = build_resolved_append_blocks(
                     alert_name=alert_name,
                     resolution_minutes=resolution_minutes,
-                    root_cause=root_cause,
                     resolved_by=f'@{user_name}',
+                    actual_resolution=actual_resolution,
                 )
-                resolved_msg['channel'] = channel_id
-                resolved_msg['ts'] = message_ts
-                _update_slack_message(resolved_msg)
+                _update_slack_message({
+                    'channel': channel_id,
+                    'ts': message_ts,
+                    'attachments': [{'color': '#2eb886', 'blocks': base_blocks + resolved_blocks}]
+                })
 
                 print(f"✅ 모달 조치완료 처리: {alert_name} ({resolution_minutes:.0f}분)")
 
@@ -637,11 +454,18 @@ def _handle_slack_interaction(event: dict) -> dict:
                 print(f"⚠️ 분석 요청: ongoing 인시던트 없음 - {alert_name}")
                 return {'statusCode': 200, 'body': ''}
 
-            # 1. Slack 메시지를 "분석 중..."으로 즉시 업데이트
-            analyzing_msg = build_alert_message(alert_info=alert_name, severity=ongoing.get('severity', 'high'))
-            analyzing_msg['channel'] = channel_id
-            analyzing_msg['ts'] = message_ts
-            _update_slack_message(analyzing_msg)
+            # 1. 현재 메시지 블록 가져오기 → 버튼/안내 제거 → "분석 중..." 추가
+            color, curr_blocks = _get_slack_message_attachment(channel_id, message_ts)
+            new_blocks = _strip_action_and_status_blocks(curr_blocks)
+            new_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "⏳ AI 분석 중... 잠시 기다려 주세요."}]
+            })
+            _update_slack_message({
+                'channel': channel_id,
+                'ts': message_ts,
+                'attachments': [{'color': color, 'blocks': new_blocks}]
+            })
 
             # 2. Lambda 자신을 비동기 호출 (LangGraph 실행)
             try:
@@ -657,6 +481,8 @@ def _handle_slack_interaction(event: dict) -> dict:
                         'severity': ongoing.get('severity', 'high'),
                         'question': ongoing.get('question', alert_name),
                         'state_change_time': ongoing.get('timestamp', datetime.utcnow().isoformat()),
+                        'memory_stats': ongoing.get('memory_stats', {}),
+                        'similar_incidents': ongoing.get('similar_incidents', []),
                     }).encode()
                 )
                 print(f"✅ 비동기 분석 요청 완료: {alert_name}")
@@ -686,10 +512,11 @@ def _handle_slack_interaction(event: dict) -> dict:
                 'blocks': [
                     {
                         'type': 'section',
-                        'text': {
-                            'type': 'mrkdwn',
-                            'text': f'*알람:* `{alert_name}`\n*근본 원인:* {root_cause_text}',
-                        },
+                        'text': {'type': 'mrkdwn', 'text': f'*알람:* `{alert_name}`'},
+                    },
+                    {
+                        'type': 'section',
+                        'text': {'type': 'mrkdwn', 'text': f'*근본 원인*\n```{root_cause_text}```'},
                     },
                     {
                         'type': 'input',
@@ -789,8 +616,34 @@ def _extract_service_info(subject: str) -> str:
     return ' / '.join(parts) if parts else ''
 
 
+AGENTCORE_RUNTIME_ARN = os.environ.get('AGENTCORE_RUNTIME_ARN', '')
+
+
 def _run_analysis_async(event: dict) -> dict:
-    """비동기로 호출된 분석 실행 (분석 요청 버튼 → Lambda self-invoke)"""
+    """비동기로 호출된 분석 실행 - AgentCore Runtime 우선, Lambda fallback"""
+    if AGENTCORE_RUNTIME_ARN:
+        print(f"🚀 AgentCore Runtime으로 분석 위임: {event.get('alert_name')}")
+        try:
+            import json as _json
+            client = boto3.client('bedrock-agentcore', region_name=os.environ.get('AWS_REGION_NAME', 'ap-northeast-2'))
+            response = client.invoke_agent_runtime(
+                agentRuntimeArn=AGENTCORE_RUNTIME_ARN,
+                payload=_json.dumps(event).encode('utf-8'),
+                contentType='application/json',
+                accept='application/json',
+            )
+            # Fire-and-forget: AgentCore Runtime이 독립적으로 분석 후 Slack 업데이트
+            print(f"✅ AgentCore Runtime 위임 완료 (async) - response keys: {list(response.keys())}")
+            return {'statusCode': 200, 'body': 'delegated to AgentCore Runtime'}
+        except Exception as e:
+            print(f"⚠️ AgentCore Runtime 호출 실패, Lambda fallback: {e}")
+            return _run_analysis_lambda(event)
+    else:
+        return _run_analysis_lambda(event)
+
+
+def _run_analysis_lambda(event: dict) -> dict:
+    """Lambda에서 직접 LangGraph 실행 (AgentCore Runtime fallback)"""
     alert_name = event['alert_name']
     slack_ts = event['slack_ts']
     slack_channel = event['slack_channel']
@@ -800,6 +653,10 @@ def _run_analysis_async(event: dict) -> dict:
 
     print(f"🔷 [Async] LangGraph 분석 시작: {alert_name}")
 
+    # SNS 수신 시 이미 조회한 메모리 결과 재사용 (중복 조회 방지)
+    memory_stats     = event.get('memory_stats', {})
+    similar_incidents = event.get('similar_incidents', [])
+
     app = build_graph()
     graph_state = app.invoke({
         "question": question,
@@ -807,8 +664,8 @@ def _run_analysis_async(event: dict) -> dict:
         "severity": severity,
         "amp_link": "",
         "category": [],
-        "memory_stats": {},
-        "similar_incidents": [],
+        "memory_stats": memory_stats,
+        "similar_incidents": similar_incidents,
         "final_answer": "",
         "session_id": "",
         "state_change_time": state_change_time,
@@ -822,15 +679,11 @@ def _run_analysis_async(event: dict) -> dict:
     except Exception:
         report_dict = {}
 
-    # DynamoDB root_cause 업데이트
-    root_cause = ', '.join(report_dict.get('likely_root_causes', []))
-    if root_cause:
-        update_ongoing_root_cause(alert_name, root_cause)
-
     result = {
         'report': report_dict,
         'session_id': graph_state.get("session_id", ""),
-        'stats': graph_state.get("memory_stats", {'is_new': True, 'count': 0})
+        'stats': graph_state.get("memory_stats", {'is_new': True, 'count': 0}),
+        'similar': graph_state.get("similar_incidents", [])
     }
 
     # Slack 메시지 업데이트 (분석 완료 내용 + 조치완료 버튼만 남김)
@@ -918,13 +771,35 @@ def lambda_handler(event, context):
             # SNS 메시지에서 description 추출 (AI 없음, 순수 파싱)
             description = _extract_alert_description(message_text, alert_name, service_info)
 
+            # AgentCore Memory 빠른 조회 (유사 과거 사례 초기 메시지에 포함)
+            similar_info = None
+            try:
+                mem_stats, mem_similar = lookup_memory(alert_name)
+                SIMILARITY_THRESHOLD = 0.5
+                high_sim = [
+                    s for s in mem_similar
+                    if s.get('similarity_score', 0) >= SIMILARITY_THRESHOLD
+                    and s.get('resolution') not in ('', 'ongoing', 'Unknown', None)
+                ]
+                if high_sim and not mem_stats.get('is_new'):
+                    best = high_sim[0]
+                    similar_info = {
+                        'count':       mem_stats.get('count', 0),
+                        'avg_minutes': mem_stats.get('avg_resolution_time', 0),
+                        'root_cause':  best.get('root_cause', ''),
+                        'resolution':  best.get('resolution', ''),
+                    }
+            except Exception as e:
+                print(f"⚠️ [lookup_memory] 초기 조회 실패 (무시): {e}")
+
             # 단순 요약 메시지 전송
             simple_msg = build_simple_alert_message(
                 alert_name=alert_name,
                 severity=severity,
                 service_info=service_info,
                 description=description,
-                detected_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                detected_at=_now_kst(),
+                similar_info=similar_info,
             )
             simple_msg['channel'] = SLACK_CHANNEL
             message_ts = _send_slack_message_and_get_ts(simple_msg)
@@ -936,9 +811,11 @@ def lambda_handler(event, context):
                 'state_change_time': state_change_time,
                 'slack_ts': message_ts,
                 'slack_channel': SLACK_CHANNEL,
-                'question': message_text,  # 분석 요청 시 LangGraph에 전달
+                'question': message_text,
                 'root_cause': '',
                 'error_messages': [],
+                'memory_stats': mem_stats if similar_info is not None else {},
+                'similar_incidents': mem_similar if similar_info is not None else [],
             })
 
             return {

@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Observability 챗봇</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e5e7eb;
+      height: 100vh;
+      display: flex;
+    }
+
+    /* ── 사이드바 ── */
+    #sidebar {
+      width: 260px;
+      background: #1a1d27;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid #2d2f3e;
+      flex-shrink: 0;
+    }
+
+    #sidebar-header {
+      padding: 16px;
+      border-bottom: 1px solid #2d2f3e;
+    }
+
+    #sidebar-header h2 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #9ca3af;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    #new-chat-btn {
+      width: 100%;
+      padding: 8px 12px;
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #new-chat-btn:hover { background: #2563eb; }
+
+    #conv-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .conv-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      color: #d1d5db;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .conv-item:hover { background: #2d2f3e; }
+    .conv-item.active { background: #2d2f3e; color: white; }
+
+    .conv-title {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .conv-delete {
+      opacity: 0;
+      background: none;
+      border: none;
+      color: #6b7280;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+    .conv-item:hover .conv-delete { opacity: 1; }
+    .conv-delete:hover { color: #ef4444; background: #374151; }
+
+    /* ── 메인 영역 ── */
+    #main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    #chat-header {
+      padding: 16px 24px;
+      border-bottom: 1px solid #2d2f3e;
+      background: #1a1d27;
+    }
+    #chat-header h1 {
+      font-size: 16px;
+      font-weight: 600;
+    }
+    #chat-header span {
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #4b5563;
+      gap: 12px;
+    }
+    .empty-state .icon { font-size: 48px; }
+    .empty-state p { font-size: 14px; }
+
+    .message {
+      display: flex;
+      gap: 12px;
+      max-width: 800px;
+    }
+    .message.user { flex-direction: row-reverse; align-self: flex-end; }
+    .message.assistant { align-self: flex-start; }
+
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .user .avatar { background: #3b82f6; }
+    .assistant .avatar { background: #7c3aed; }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.6;
+      max-width: 640px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .user .bubble {
+      background: #1e3a5f;
+      border-radius: 12px 4px 12px 12px;
+    }
+    .assistant .bubble {
+      background: #1f2133;
+      border-radius: 4px 12px 12px 12px;
+    }
+
+    .typing .bubble {
+      color: #6b7280;
+      font-style: italic;
+    }
+
+    /* ── 입력 영역 ── */
+    #input-area {
+      padding: 16px 24px;
+      border-top: 1px solid #2d2f3e;
+      background: #1a1d27;
+    }
+
+    #input-wrap {
+      display: flex;
+      gap: 10px;
+      background: #2d2f3e;
+      border-radius: 12px;
+      padding: 8px 12px;
+      align-items: flex-end;
+    }
+
+    #user-input {
+      flex: 1;
+      background: none;
+      border: none;
+      outline: none;
+      color: #e5e7eb;
+      font-size: 14px;
+      resize: none;
+      max-height: 120px;
+      line-height: 1.5;
+    }
+    #user-input::placeholder { color: #4b5563; }
+
+    #send-btn {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      width: 34px;
+      height: 34px;
+      cursor: pointer;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    #send-btn:hover { background: #2563eb; }
+    #send-btn:disabled { background: #374151; cursor: not-allowed; }
+
+    #input-hint {
+      font-size: 11px;
+      color: #4b5563;
+      margin-top: 6px;
+      text-align: center;
+    }
+
+    /* 스크롤바 */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+<!-- 사이드바 -->
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h2>🔭 Observability</h2>
+    <button id="new-chat-btn" onclick="newChat()">＋ 새 대화</button>
+  </div>
+  <div id="conv-list"></div>
+</div>
+
+<!-- 메인 -->
+<div id="main">
+  <div id="chat-header">
+    <h1 id="chat-title">대화를 선택하거나 새 대화를 시작하세요</h1>
+    <span id="chat-subtitle"></span>
+  </div>
+
+  <div id="messages">
+    <div class="empty-state">
+      <div class="icon">🔭</div>
+      <p>메트릭, 로그, 인시던트 이력 등을 자유롭게 질문하세요</p>
+    </div>
+  </div>
+
+  <div id="input-area">
+    <div id="input-wrap">
+      <textarea id="user-input" rows="1" placeholder="메시지를 입력하세요... (Shift+Enter로 줄바꿈)"></textarea>
+      <button id="send-btn" onclick="sendMessage()">➤</button>
+    </div>
+    <div id="input-hint">Enter로 전송 · Shift+Enter로 줄바꿈</div>
+  </div>
+</div>
+
+<script>
+  let currentConvId = null;
+
+  // ── 초기화 ──────────────────────────────────────────────────
+  async function init() {
+    await loadConversations();
+
+    document.getElementById('user-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // 자동 높이 조절
+    document.getElementById('user-input').addEventListener('input', function () {
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+    });
+  }
+
+  // ── 대화 목록 ────────────────────────────────────────────────
+  async function loadConversations() {
+    const res = await fetch('/conversations');
+    const convs = await res.json();
+    renderConvList(convs);
+  }
+
+  function renderConvList(convs) {
+    const list = document.getElementById('conv-list');
+    list.innerHTML = '';
+    for (const c of convs) {
+      const item = document.createElement('div');
+      item.className = 'conv-item' + (c.id === currentConvId ? ' active' : '');
+      item.innerHTML = `
+        <span class="conv-title" onclick="loadConversation('${c.id}')">${escHtml(c.title)}</span>
+        <button class="conv-delete" onclick="deleteConversation('${c.id}', event)" title="삭제">✕</button>
+      `;
+      list.appendChild(item);
+    }
+  }
+
+  // ── 새 대화 ──────────────────────────────────────────────────
+  async function newChat() {
+    const res = await fetch('/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: '' })
+    });
+    const conv = await res.json();
+    currentConvId = conv.id;
+    await loadConversations();
+    renderMessages([]);
+    document.getElementById('chat-title').textContent = '새 대화';
+    document.getElementById('chat-subtitle').textContent = '';
+    document.getElementById('user-input').focus();
+  }
+
+  // ── 대화 로드 ────────────────────────────────────────────────
+  async function loadConversation(cid) {
+    currentConvId = cid;
+    const res = await fetch(`/conversations/${cid}`);
+    const data = await res.json();
+    document.getElementById('chat-title').textContent = data.conversation.title;
+    document.getElementById('chat-subtitle').textContent =
+      new Date(data.conversation.created_at).toLocaleString('ko-KR');
+    renderMessages(data.messages);
+    await loadConversations();
+  }
+
+  // ── 대화 삭제 ────────────────────────────────────────────────
+  async function deleteConversation(cid, e) {
+    e.stopPropagation();
+    if (!confirm('이 대화를 삭제할까요?')) return;
+    await fetch(`/conversations/${cid}`, { method: 'DELETE' });
+    if (currentConvId === cid) {
+      currentConvId = null;
+      renderMessages([]);
+      document.getElementById('chat-title').textContent = '대화를 선택하거나 새 대화를 시작하세요';
+    }
+    await loadConversations();
+  }
+
+  // ── 메시지 렌더링 ─────────────────────────────────────────────
+  function renderMessages(messages) {
+    const container = document.getElementById('messages');
+    if (!messages.length) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="icon">🔭</div>
+          <p>메트릭, 로그, 인시던트 이력 등을 자유롭게 질문하세요</p>
+        </div>`;
+      return;
+    }
+    container.innerHTML = '';
+    for (const m of messages) {
+      appendMessage(m.role, m.content);
+    }
+    scrollBottom();
+  }
+
+  function appendMessage(role, content) {
+    const container = document.getElementById('messages');
+    // 빈 상태 제거
+    const empty = container.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    const avatar = role === 'user' ? '👤' : '🤖';
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    div.innerHTML = `
+      <div class="avatar">${avatar}</div>
+      <div class="bubble">${escHtml(content)}</div>
+    `;
+    container.appendChild(div);
+  }
+
+  function appendTyping() {
+    const container = document.getElementById('messages');
+    const div = document.createElement('div');
+    div.className = 'message assistant typing';
+    div.id = 'typing-indicator';
+    div.innerHTML = `<div class="avatar">🤖</div><div class="bubble">분석 중...</div>`;
+    container.appendChild(div);
+    scrollBottom();
+    return div;
+  }
+
+  // ── 메시지 전송 ──────────────────────────────────────────────
+  async function sendMessage() {
+    const input = document.getElementById('user-input');
+    const text = input.value.trim();
+    if (!text) return;
+
+    // 대화 없으면 새로 생성
+    if (!currentConvId) {
+      const res = await fetch('/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
+      const conv = await res.json();
+      currentConvId = conv.id;
+      document.getElementById('chat-title').textContent = conv.title;
+      await loadConversations();
+    }
+
+    input.value = '';
+    input.style.height = 'auto';
+    appendMessage('user', text);
+    scrollBottom();
+
+    const sendBtn = document.getElementById('send-btn');
+    sendBtn.disabled = true;
+    const typing = appendTyping();
+
+    try {
+      const res = await fetch(`/conversations/${currentConvId}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
+      const data = await res.json();
+      typing.remove();
+      appendMessage('assistant', data.message.content);
+      scrollBottom();
+      await loadConversations();
+    } catch (err) {
+      typing.remove();
+      appendMessage('assistant', '오류가 발생했습니다: ' + err.message);
+    } finally {
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  function scrollBottom() {
+    const m = document.getElementById('messages');
+    m.scrollTop = m.scrollHeight;
+  }
+
+  function escHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+              .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+  }
+
+  init();
+</script>
+</body>
+</html>

@@ -1,3 +1,6 @@
 {
-    "kiroAgent.configureMCP": "Disabled"
+    "kiroAgent.configureMCP": "Disabled",
+    "python.analysis.extraPaths": [
+        "./lambda_package"
+    ]
 }
