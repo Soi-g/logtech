@@ -30,6 +30,40 @@ from strands import Agent, tool
 from strands.models import BedrockModel
 
 
+try:
+    from cw_logger import cw_log
+except Exception:
+    def cw_log(msg): pass
+
+
+def _log(msg: str):
+    """print + cw_log 동시 출력 (Lambda/AgentCore 양쪽 로그 그룹에서 확인 가능)"""
+    print(msg)
+    cw_log(msg)
+
+
+# ============================================================
+# Raw tool output 캡처 — Collector 할루시네이션 방지용
+# Collector가 tool 반환값을 요약하는 과정에서 수치를 왜곡하는 문제를
+# 해결하기 위해 원본 반환값을 별도로 저장하여 Writer에 직접 전달함
+# ============================================================
+import threading as _threading
+_raw_outputs: dict = {}
+_raw_outputs_lock = _threading.Lock()
+
+
+def clear_raw_outputs():
+    """Collector 호출 전 이전 결과 초기화"""
+    with _raw_outputs_lock:
+        _raw_outputs.clear()
+
+
+def get_raw_outputs() -> dict:
+    """Collector 호출 후 tool 원본 반환값 조회"""
+    with _raw_outputs_lock:
+        return dict(_raw_outputs)
+
+
 # ============================================================
 # 환경변수
 # ============================================================
@@ -61,7 +95,7 @@ AMP_SCHEMA = """
 - source: 데이터 수집 경로 구분 — "app"(OTLP/앱 SDK), "container"(docker_stats), "host"(hostmetrics), "sys"(syslog)
   - http_server_request_duration_seconds_count 등 앱 메트릭은 source="app" 고정
   - 파생 메트릭(job:http_4xx_error_ratio:rate5m 등)에도 source 라벨 보존됨
-- 반드시 job 라벨로 서비스를 필터할 것. service_name 라벨은 존재하지 않음.
+- 반드시 job 라벨로 서비스를 필터할 것. service_name 라벨도 존재하나 job 우선 사용.
 
 ### 파생 메트릭 (Recording Rules — 우선 사용)
 http:  job:http_4xx_error_ratio:rate5m       (4xx 에러율, job+deployment_environment+source 라벨)
@@ -72,7 +106,7 @@ app:   app_http_server_requests_5m           (총 요청 수)
        app_http_server_5xx_error_ratio_5m    (5xx 에러율)
        app_http_server_4xx_error_ratio_5m    (4xx 에러율)
        app_http_server_latency_p95_5m        (P95 응답시간)
-  ※ 모든 app_* 파생 메트릭은 source, deployment_environment, service_namespace 라벨 포함
+  ※ 모든 app_* 파생 메트릭은 source, deployment_environment, service_namespace, service_name 라벨 포함
 infra: app_container_cpu_utilization_avg_5m, app_container_memory_utilization_avg_5m
 jvm:   app_jvm_cpu_utilization_avg_5m, app_jvm_memory_used_avg_5m,
        app_jvm_gc_count_5m, app_jvm_gc_duration_p95_5m
@@ -171,7 +205,7 @@ def query_opensearch(index: str, query: dict) -> dict:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except Exception as e:
-        print(f"[query_opensearch 에러] {e}")
+        _log(f"[query_opensearch 에러] {e}")
         return {"error": str(e), "hits": {"hits": []}}
 
 
@@ -207,8 +241,33 @@ def fetch_amp_metric(promql: str, last_minutes: int = 0) -> str:
         else:
             url = f"{_amp_base_url()}/query?query={q}"
         out = _amp_signed_request(url)
+        # 데이터 신선도 정보 추가 (range query인 경우만)
+        if last_minutes > 0:
+            results = out.get("data", {}).get("result", [])
+            now_ts = int(time.time())
+            last_ts = None
+            for series in results:
+                values = series.get("values", [])
+                if values:
+                    candidate = values[-1][0]
+                    if last_ts is None or candidate > last_ts:
+                        last_ts = candidate
+            if last_ts is not None:
+                out["_meta"] = {
+                    "current_unix_time": now_ts,
+                    "last_data_timestamp": last_ts,
+                    "last_data_age_seconds": now_ts - last_ts,
+                }
+            else:
+                # 데이터가 전혀 없음 — 서비스 다운 또는 스크래핑 중단
+                out["_meta"] = {
+                    "current_unix_time": now_ts,
+                    "last_data_timestamp": None,
+                    "last_data_age_seconds": None,
+                    "no_data": True,
+                }
         preview = json.dumps(out.get("data", {}).get("result", [])[:2], ensure_ascii=False)[:300]
-        print(f"[TOOL] fetch_amp_metric promql={promql!r} last_minutes={last_minutes} status={out.get('status','ok')} preview={preview}")
+        _log(f"[TOOL] fetch_amp_metric promql={promql!r} last_minutes={last_minutes} status={out.get('status','ok')} preview={preview}")
         return json.dumps(out, ensure_ascii=False)[:4000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -254,11 +313,31 @@ def fetch_logs(
             "sort": [{"@timestamp": {"order": "desc"}}],
             "query": {"bool": {"filter": must_filters}},
         })
+        if "error" in resp:
+            err_msg = f"OpenSearch 조회 실패: {resp['error']}"
+            _log(f"[TOOL] fetch_logs index={target_index} service={service} env={environment} -> ERROR: {resp['error']}")
+            return json.dumps({"status": "error", "message": err_msg})
         hits = resp.get("hits", {}).get("hits", [])
+        latest_log_ts = hits[0]["_source"].get("@timestamp") if hits else None
+        now_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # 최근 로그 신선도 경고: 마지막 로그가 5분 이상 이전이면 서비스 다운 의심
+        log_age_warning = None
+        if latest_log_ts:
+            try:
+                import datetime as _dt
+                last_dt = _dt.datetime.strptime(latest_log_ts[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=_dt.timezone.utc)
+                age_sec = int((time.time() - last_dt.timestamp()))
+                if age_sec > 300:
+                    log_age_warning = f"경고: 마지막 로그가 {age_sec//60}분 {age_sec%60}초 전입니다. 서비스가 그 이후 로그를 생성하지 않음 = 서비스 다운 가능성 높음"
+            except Exception:
+                pass
         out = {
             "status": "success",
             "index": target_index,
             "count": len(hits),
+            "current_time_utc": now_utc,
+            "latest_log_timestamp": latest_log_ts,
+            "log_age_warning": log_age_warning,
             "samples": [{
                 "timestamp": h["_source"].get("@timestamp"),
                 "severity": (h["_source"].get("severity") or {}).get("text"),
@@ -267,9 +346,7 @@ def fetch_logs(
             } for h in hits],
         }
         sample = hits[0]["_source"].get("body", "")[:100] if hits else ""
-        print(f"[TOOL] fetch_logs index={target_index} service={service} env={environment} "
-              f"severity={severity or '(all)'} last_minutes={last_minutes} -> count={len(hits)}"
-              + (f" sample={sample!r}" if sample else ""))
+        _log(f"[TOOL] fetch_logs index={target_index} service={service} env={environment} severity={severity or '(all)'} last_minutes={last_minutes} -> count={len(hits)}" + (f" sample={sample!r}" if sample else ""))
         return json.dumps(out, ensure_ascii=False)[:4000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -303,6 +380,9 @@ def fetch_traces(
             "sort": [{"startTime": {"order": "desc"}}],
             "query": {"bool": {"filter": must_filters}},
         })
+        if "error" in resp:
+            _log(f"[TOOL] fetch_traces service={service} env={environment} -> ERROR: {resp['error']}")
+            return json.dumps({"status": "error", "message": f"OpenSearch 조회 실패: {resp['error']}"})
         hits = resp.get("hits", {}).get("hits", [])
         total_val = resp.get("hits", {}).get("total")
         total_count = total_val.get("value", len(hits)) if isinstance(total_val, dict) else len(hits)
@@ -317,7 +397,7 @@ def fetch_traces(
                 "status": h["_source"].get("status", {}),
             } for h in hits[:15]],
         }
-        print(f"[TOOL] fetch_traces service={service} env={environment} "
+        _log(f"[TOOL] fetch_traces service={service} env={environment} "
               f"status_filter={status_filter!r} last_minutes={last_minutes} -> spans={len(hits)} total={total_count}")
         return json.dumps(out, ensure_ascii=False)[:4000]
     except Exception as e:
@@ -364,7 +444,7 @@ def fetch_cloudwatch_metric(
                 "max": max((d.get(stat, d.get("Average", 0)) for d in datapoints), default=None),
             },
         }
-        print(f"[TOOL] fetch_cloudwatch_metric {namespace}/{metric_name} -> {len(datapoints)} points latest={result['summary']['latest']}")
+        _log(f"[TOOL] fetch_cloudwatch_metric {namespace}/{metric_name} -> {len(datapoints)} points latest={result['summary']['latest']}")
         return json.dumps(result, ensure_ascii=False, default=str)[:3000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -392,7 +472,7 @@ def fetch_cloudwatch_alarms(state: str = "ALARM", name_prefix: str = "") -> str:
                 "state_updated": str(a.get("StateUpdatedTimestamp", "")),
             } for a in alarms[:20]],
         }
-        print(f"[TOOL] fetch_cloudwatch_alarms state={state} -> {len(alarms)} alarms")
+        _log(f"[TOOL] fetch_cloudwatch_alarms state={state} -> {len(alarms)} alarms")
         return json.dumps(result, ensure_ascii=False, default=str)[:3000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -438,7 +518,7 @@ def fetch_cloudwatch_logs(
                 "message": e["message"][:200],
             } for e in sorted(events, key=lambda x: x["timestamp"], reverse=True)[:limit]],
         }
-        print(f"[TOOL] fetch_cloudwatch_logs group={log_group} pattern={filter_pattern!r} -> {len(events)} events")
+        _log(f"[TOOL] fetch_cloudwatch_logs group={log_group} pattern={filter_pattern!r} -> {len(events)} events")
         return json.dumps(result, ensure_ascii=False, default=str)[:4000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -467,7 +547,7 @@ def fetch_rds_status(db_instance_identifier: str = "") -> str:
                 "pending_changes": i.get("PendingModifiedValues", {}),
             } for i in instances],
         }
-        print(f"[TOOL] fetch_rds_status db={db_instance_identifier or 'all'} -> {len(instances)} instances")
+        _log(f"[TOOL] fetch_rds_status db={db_instance_identifier or 'all'} -> {len(instances)} instances")
         return json.dumps(result, ensure_ascii=False, default=str)[:3000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -491,7 +571,7 @@ def fetch_rds_events(db_instance_identifier: str = "", last_minutes: int = 60) -
                 "message": e.get("Message", ""),
             } for e in sorted(events, key=lambda x: x.get("Date", ""), reverse=True)[:20]],
         }
-        print(f"[TOOL] fetch_rds_events db={db_instance_identifier or 'all'} last={last_minutes}m -> {len(events)} events")
+        _log(f"[TOOL] fetch_rds_events db={db_instance_identifier or 'all'} last={last_minutes}m -> {len(events)} events")
         return json.dumps(result, ensure_ascii=False, default=str)[:3000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -537,7 +617,7 @@ def fetch_ec2_status(instance_ids: str = "", name_filter: str = "") -> str:
                     "security_groups": [{"id": sg["GroupId"], "name": sg["GroupName"]} for sg in i.get("SecurityGroups", [])],
                 })
         result = {"status": "success", "instances": instances}
-        print(f"[TOOL] fetch_ec2_status filter={instance_ids or name_filter or 'all'} -> {len(instances)} instances")
+        _log(f"[TOOL] fetch_ec2_status filter={instance_ids or name_filter or 'all'} -> {len(instances)} instances")
         return json.dumps(result, ensure_ascii=False, default=str)[:3000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -584,7 +664,7 @@ def fetch_cloudtrail_events(
                 "resources": [r.get("ResourceName", "") for r in e.get("Resources", [])],
             } for e in sorted(all_events, key=lambda x: x.get("EventTime", ""), reverse=True)[:20]],
         }
-        print(f"[TOOL] fetch_cloudtrail_events resource={resource_name!r} events={event_names!r} -> {len(all_events)} events")
+        _log(f"[TOOL] fetch_cloudtrail_events resource={resource_name!r} events={event_names!r} -> {len(all_events)} events")
         return json.dumps(result, ensure_ascii=False, default=str)[:3000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -617,7 +697,7 @@ def fetch_elb_health(load_balancer_name: str = "", target_group_name: str = "") 
                         "reason": t["TargetHealth"].get("Reason", ""),
                     } for t in health.get("TargetHealthDescriptions", [])],
                 })
-        print(f"[TOOL] fetch_elb_health lb={load_balancer_name!r} -> {len(result_data)} target groups")
+        _log(f"[TOOL] fetch_elb_health lb={load_balancer_name!r} -> {len(result_data)} target groups")
         return json.dumps({"status": "success", "load_balancers": result_data}, ensure_ascii=False, default=str)[:3000]
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
@@ -644,7 +724,7 @@ def fetch_autoscaling_activity(asg_name: str = "", last_minutes: int = 60) -> st
                         "time": str(a.get("StartTime", "")),
                         "cause": a.get("Cause", ""), "status": a.get("StatusCode", ""),
                     })
-        print(f"[TOOL] fetch_autoscaling_activity asg={asg_name or 'all'} -> {len(all_activities)} activities")
+        _log(f"[TOOL] fetch_autoscaling_activity asg={asg_name or 'all'} -> {len(all_activities)} activities")
         return json.dumps({
             "status": "success", "asg_count": len(asgs),
             "activities": sorted(all_activities, key=lambda x: x["time"], reverse=True)[:20],
@@ -686,6 +766,7 @@ Decision rules:
 - RDS/EC2 AWS-level 메트릭 → fetch_cloudwatch_metric
 - AMP 빈 결과 + prod 환경 → CloudWatch도 시도
 - "현재 알람" 또는 "어떤 알람 발생 중" → fetch_cloudwatch_alarms
+- "에러율" 단독 요청 시 → 4xx + 5xx 둘 다 조회 (app_http_server_4xx_error_ratio_5m + app_http_server_5xx_error_ratio_5m)
 
 LIMIT: 최대 2회 tool 호출. 2회 안에 핵심 수치를 확보하고 결과를 반환하라.
 Always return actual numeric values with units. (max 800 tokens)"""
@@ -710,10 +791,15 @@ Tools:
    - RDS 에러: "/aws/rds/instance/{db-identifier}/error"
    - Lambda 로그: "/aws/lambda/{function-name}"
 
-Key rules:
+Tool selection rules:
+- query에 "트레이스", "traces", "span", "분산 추적" 중 하나라도 포함 → fetch_traces 사용
+- query에 에러 트레이스 확인 요청 → fetch_traces(status_filter="Error") 사용
+- 위 조건 해당 없으면 → fetch_logs 사용 (fetch_traces 호출 금지)
+- RDS 내부 에러 로그 확인 시 → fetch_cloudwatch_logs 사용
+
+Other rules:
 - 로그 0건이면 last_minutes 늘려서 재시도 1회만 허용 (10 → 30)
 - logs-host의 인프라/OS 로그는 무시하고 앱 로그만 보고할 것
-- RDS 내부 에러 로그 확인 시 → fetch_cloudwatch_logs 사용
 
 LIMIT: 최대 3회 tool 호출. 3회 안에 핵심 로그/트레이스를 확보하고 결과를 반환하라.
 Return concise summary. (max 800 tokens)"""
@@ -755,7 +841,7 @@ Conclude HEALTHY or UNHEALTHY with specific evidence. (max 1000 tokens)"""
 # Strands 모델
 # ============================================================
 _model = BedrockModel(
-    model_id=os.environ.get("ANALYSIS_MODEL_ID", "global.anthropic.claude-haiku-4-5-20251001-v1:0"),
+    model_id=os.environ.get("ANALYSIS_MODEL_ID", "apac.anthropic.claude-sonnet-4-20250514-v1:0"),
     region_name=AWS_REGION,
     streaming=False,
 )
@@ -808,14 +894,20 @@ def metrics_agent(query: str) -> str:
 
     query에 포함할 내용: 서비스명, 환경(dev/prod), 시간 범위, 원하는 메트릭 종류
     """
-    print(f"[SUB-AGENT] metrics_agent query={query!r}")
+    _log(f"[SUB-AGENT] metrics_agent query={query!r}")
     try:
         result = _metrics_agent_instance(query)
         text = str(result)
-        print(f"[SUB-AGENT] metrics_agent done len={len(text)}")
+        # 원본 반환값 저장 — Writer에 직접 전달하여 Collector 요약 왜곡 방지
+        with _raw_outputs_lock:
+            _raw_outputs["metrics_agent"] = text[:3000]
+        _log(f"[TOOL_RAW] metrics_agent result={text[:2000]}")
         return text[:4000]
     except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        err = json.dumps({"status": "error", "message": str(e)})
+        with _raw_outputs_lock:
+            _raw_outputs["metrics_agent"] = err
+        return err
 
 
 @tool
@@ -830,14 +922,19 @@ def logs_agent(query: str) -> str:
 
     query에 포함할 내용: 서비스명, 환경(dev/prod), 시간 범위, 로그 레벨/키워드
     """
-    print(f"[SUB-AGENT] logs_agent query={query!r}")
+    _log(f"[SUB-AGENT] logs_agent query={query!r}")
     try:
         result = _logs_agent_instance(query)
         text = str(result)
-        print(f"[SUB-AGENT] logs_agent done len={len(text)}")
+        with _raw_outputs_lock:
+            _raw_outputs["logs_agent"] = text[:3000]
+        _log(f"[TOOL_RAW] logs_agent result={text[:2000]}")
         return text[:4000]
     except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        err = json.dumps({"status": "error", "message": str(e)})
+        with _raw_outputs_lock:
+            _raw_outputs["logs_agent"] = err
+        return err
 
 
 @tool
@@ -853,14 +950,19 @@ def infrastructure_agent(query: str) -> str:
 
     query에 포함할 내용: 리소스 종류, 환경(prod), 확인할 상태 또는 증상
     """
-    print(f"[SUB-AGENT] infrastructure_agent query={query!r}")
+    _log(f"[SUB-AGENT] infrastructure_agent query={query!r}")
     try:
         result = _infrastructure_agent_instance(query)
         text = str(result)
-        print(f"[SUB-AGENT] infrastructure_agent done len={len(text)}")
+        with _raw_outputs_lock:
+            _raw_outputs["infrastructure_agent"] = text[:3000]
+        _log(f"[TOOL_RAW] infrastructure_agent result={text[:2000]}")
         return text[:4000]
     except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        err = json.dumps({"status": "error", "message": str(e)})
+        with _raw_outputs_lock:
+            _raw_outputs["infrastructure_agent"] = err
+        return err
 
 
 # ============================================================
@@ -954,10 +1056,10 @@ def get_active_services() -> str:
     try:
         q = urllib.parse.quote("job:http_known_services:presence", safe="")
         url = f"{_amp_base_url()}/query?query={q}"
-        print(f"[TOOL] get_active_services url={url}")
+        _log(f"[TOOL] get_active_services url={url}")
         data = _amp_signed_request(url)
         items = data.get("data", {}).get("result", [])
-        print(f"[TOOL] get_active_services items={len(items)}")
+        _log(f"[TOOL] get_active_services items={len(items)}")
 
         if not items:
             return json.dumps({"message": "현재 활성 서비스 없음"})

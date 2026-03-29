@@ -36,20 +36,30 @@ function Get-TfVar($name) {
     return ""
 }
 
-$SlackToken   = Get-TfVar "slack_bot_token"
-$SlackChannel = Get-TfVar "slack_channel"
-$MemoryId     = Get-TfVar "agentcore_memory_id"
-$DdbTable     = (terraform output -raw dynamodb_incident_table).Trim()
-$AmpEndpoint  = (terraform output -raw amp_endpoint).Trim() + "api/v1/"
-$OsEndpoint   = (terraform output -raw opensearch_endpoint).Trim()
+$SlackToken      = Get-TfVar "slack_bot_token"
+$SlackChannel    = Get-TfVar "slack_channel"
+$MemoryId        = Get-TfVar "agentcore_memory_id"
+$LangSmithApiKey = Get-TfVar "langsmith_api_key"  # LangSmith 트레이싱 — AgentCore에서 LangGraph 실행 시 트레이스 기록
+$DdbTable       = (terraform output -raw dynamodb_incident_table).Trim()
+$AmpEndpoint    = (terraform output -raw amp_endpoint).Trim() + "api/v1/"
+# -replace '^https?://' — agents_aws.py가 url = f"https://{OS_ENDPOINT}/..." 로 직접 조합하므로 https:// 제거
+$OsEndpoint     = (terraform output -raw opensearch_endpoint).Trim() -replace '^https?://', ''
+# VPC 모드용 — Lambda와 동일한 SG/Subnet 사용 (OpenSearch 접근 허용 규칙 공유)
+$PrivateSubnet  = (terraform output -raw private_subnet_id).Trim()
+$LambdaSg       = (terraform output -raw lambda_sg_id).Trim()
 
 # JSON 파일로 저장 (PowerShell 이스케이프 회피)
 $Artifact = @{
     containerConfiguration = @{ containerUri = $ImageUri }
 } | ConvertTo-Json -Depth 3 -Compress
 
-$Network = @{ networkMode = "PUBLIC" } | ConvertTo-Json -Compress
+# VPC 모드: AgentCore Runtime을 VPC 내부에서 실행 (OpenSearch VPC 전용 접근 가능)
+# Lambda와 동일한 SG를 사용하므로 OpenSearch SG의 인그레스 규칙이 그대로 적용됨
+# -f 포맷 연산자 사용 — 문자열 연결(+) 방식의 PowerShell 파싱 오류 회피
+$Network = '{{"networkMode":"VPC","networkModeConfig":{{"securityGroups":["{0}"],"subnets":["{1}"]}}}}' -f $LambdaSg, $PrivateSubnet
 
+# ANALYSIS_MODEL_ID: Collector + sub-agent(metrics/logs/infra) 모델 — Sonnet 4 (tool_use 안정성)
+# WRITER_MODEL_ID는 기본값(Haiku) 사용 — 환경변수 미설정 시 graph_agent_with_memory.py 기본값 적용
 $EnvVars = @{
     DYNAMODB_INCIDENT_TABLE = $DdbTable
     AMP_ENDPOINT            = $AmpEndpoint
@@ -60,11 +70,18 @@ $EnvVars = @{
     SLACK_CHANNEL           = $SlackChannel
     AWS_REGION_NAME         = $Region
     AGENTCORE_MEMORY_ID     = $MemoryId
+    ANALYSIS_MODEL_ID       = "apac.anthropic.claude-sonnet-4-20250514-v1:0"
 } | ConvertTo-Json -Compress
 
-[System.IO.File]::WriteAllText("$PWD\artifact.json", $Artifact, [System.Text.Encoding]::ASCII)
-[System.IO.File]::WriteAllText("$PWD\network.json",  $Network,  [System.Text.Encoding]::ASCII)
-[System.IO.File]::WriteAllText("$PWD\envvars.json",  $EnvVars,  [System.Text.Encoding]::ASCII)
+# 디버그: 파일 쓰기 전 변수값 확인 (VPC 모드 전환 후 오류 추적용)
+Write-Host "PrivateSubnet: $PrivateSubnet"
+Write-Host "LambdaSg     : $LambdaSg"
+Write-Host "Network JSON : $Network"
+
+# Set-Content 사용 — WriteAllText($PWD\...) 경로 해석 오류 회피, 상대경로로 안전하게 기록
+Set-Content -Path "artifact.json" -Value $Artifact -Encoding ASCII
+Set-Content -Path "network.json"  -Value $Network  -Encoding ASCII
+Set-Content -Path "envvars.json"  -Value $EnvVars  -Encoding ASCII
 
 # 런타임 존재 여부 확인
 $ExistingRuntimes = aws bedrock-agentcore-control list-agent-runtimes --region $Region | ConvertFrom-Json

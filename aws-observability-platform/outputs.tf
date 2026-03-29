@@ -142,10 +142,21 @@ output "next_steps" {
 
 output "sns_topic_arn" {
   description = "SNS 알람 토픽 ARN"
-  value       = module.alerting.sns_topic_arn
+  value       = module.observability.sns_topic_arn
 }
 
 output "agent_function_url" {
   description = "Lambda 에이전트 Function URL"
   value       = module.alerting.agent_function_url
+}
+
+# AgentCore Runtime VPC 모드 설정용 — build_agentcore.ps1에서 terraform output으로 참조
+output "private_subnet_id" {
+  description = "Private Subnet ID — AgentCore Runtime을 VPC 모드로 실행할 때 사용"
+  value       = module.networking.private_subnet_id
+}
+
+output "lambda_sg_id" {
+  description = "Lambda Security Group ID — AgentCore Runtime VPC 모드에서 재사용 (OpenSearch 접근 허용 규칙 공유)"
+  value       = module.alerting.lambda_sg_id
 }

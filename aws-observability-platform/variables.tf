@@ -60,6 +60,13 @@ variable "slack_channel" {
   type        = string
 }
 
+variable "slack_signing_secret" {
+  description = "Slack 앱 Signing Secret (/analyze 슬래시 커맨드 서명 검증)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "agentcore_memory_id" {
   description = "Bedrock AgentCore Memory Store ID (create-memory CLI로 생성 후 설정)"
   type        = string
@@ -69,6 +76,14 @@ variable "agentcore_memory_id" {
 variable "agentcore_runtime_arn" {
   description = "AgentCore Runtime ARN (비어있으면 Lambda에서 직접 실행)"
   type        = string
+  default     = ""
+}
+
+# LangSmith — LangGraph RCA 실행 트레이싱 (memory/rca/memory_save 노드별 입출력, Collector 툴 호출 내역 기록)
+variable "langsmith_api_key" {
+  description = "LangSmith API 키 — LangGraph 실행 트레이싱용"
+  type        = string
+  sensitive   = true
   default     = ""
 }
 

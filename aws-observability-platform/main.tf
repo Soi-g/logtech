@@ -59,14 +59,14 @@ module "observability" {
   opensearch_master_user     = var.opensearch_master_user
   opensearch_master_password = var.opensearch_master_password
 
-  s3_logs_backup_id    = module.storage.logs_backup_id
-  s3_logs_backup_arn   = module.storage.logs_backup_arn
-  s3_traces_backup_id  = module.storage.traces_backup_id
-  s3_traces_backup_arn = module.storage.traces_backup_arn
+  s3_logs_backup_id     = module.storage.logs_backup_id
+  s3_logs_backup_arn    = module.storage.logs_backup_arn
+  s3_traces_backup_id   = module.storage.traces_backup_id
+  s3_traces_backup_arn  = module.storage.traces_backup_arn
   s3_metrics_backup_id  = module.storage.metrics_backup_id
   s3_metrics_backup_arn = module.storage.metrics_backup_arn
-  s3_runbooks_arn      = module.storage.runbooks_arn
-  s3_athena_results_id = module.storage.athena_results_id
+  s3_runbooks_arn       = module.storage.runbooks_arn
+  s3_athena_results_id  = module.storage.athena_results_id
 }
 
 module "chatbot" {
@@ -87,7 +87,7 @@ module "alerting" {
   opensearch_arn      = module.observability.opensearch_arn
   opensearch_endpoint = module.observability.opensearch_endpoint
   amp_endpoint        = module.observability.amp_endpoint
-  amp_workspace_id    = module.observability.amp_workspace_id
+  sns_topic_arn       = module.observability.sns_topic_arn
 
   s3_deploy_id  = module.storage.deploy_id
   s3_deploy_arn = module.storage.deploy_arn
@@ -96,6 +96,7 @@ module "alerting" {
   opensearch_master_password = var.opensearch_master_password
   slack_bot_token            = var.slack_bot_token
   slack_channel              = var.slack_channel
+  slack_signing_secret       = var.slack_signing_secret
   agentcore_memory_id        = var.agentcore_memory_id
   agentcore_runtime_arn      = var.agentcore_runtime_arn
 
@@ -103,6 +104,7 @@ module "alerting" {
   bedrock_agent_id        = aws_bedrockagent_agent.observability.id
   bedrock_agent_alias_id  = aws_bedrockagent_agent_alias.prod.agent_alias_id
   dynamodb_incident_table = aws_dynamodb_table.incident_ongoing.name
+  langsmith_api_key       = var.langsmith_api_key  # LangSmith 트레이싱용 API 키
 }
 
 module "compute" {

@@ -31,25 +31,6 @@ resource "aws_security_group_rule" "opensearch_from_lambda" {
 # SNS Topic
 # ============================================================
 
-resource "aws_sns_topic" "alerts" {
-  name = "${var.project_name}-alerts"
-  tags = { Name = "${var.project_name}-alerts" }
-}
-
-resource "aws_sns_topic_policy" "alerts" {
-  arn = aws_sns_topic.alerts.arn
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect    = "Allow"
-        Principal = { Service = "aps.amazonaws.com" }
-        Action    = "sns:Publish"
-        Resource  = aws_sns_topic.alerts.arn
-      }
-    ]
-  })
-}
 
 # ============================================================
 # Lambda IAM Role
@@ -259,9 +240,14 @@ resource "aws_lambda_function" "agent" {
       OPENSEARCH_PASSWORD     = var.opensearch_master_password
       SLACK_BOT_TOKEN         = var.slack_bot_token
       SLACK_CHANNEL           = var.slack_channel
+      SLACK_SIGNING_SECRET    = var.slack_signing_secret
       AWS_REGION_NAME         = var.aws_region
       AGENTCORE_MEMORY_ID     = var.agentcore_memory_id
       AGENTCORE_RUNTIME_ARN   = var.agentcore_runtime_arn
+      # LangSmith — LangGraph 실행 트레이싱 (노드별 입출력, 툴 호출, 소요 시간 기록)
+      LANGCHAIN_TRACING_V2    = "true"
+      LANGCHAIN_API_KEY       = var.langsmith_api_key
+      LANGCHAIN_PROJECT       = "observability-rca"
     }
   }
 
@@ -278,11 +264,11 @@ resource "aws_lambda_permission" "sns_trigger" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.agent.function_name
   principal     = "sns.amazonaws.com"
-  source_arn    = aws_sns_topic.alerts.arn
+  source_arn    = var.sns_topic_arn
 }
 
 resource "aws_sns_topic_subscription" "lambda" {
-  topic_arn = aws_sns_topic.alerts.arn
+  topic_arn = var.sns_topic_arn
   protocol  = "lambda"
   endpoint  = aws_lambda_function.agent.arn
 }
@@ -301,185 +287,3 @@ resource "aws_lambda_permission" "agent_url" {
 }
 
 # ============================================================
-# AMP Alert Rules & Alertmanager
-# ============================================================
-
-resource "aws_prometheus_rule_group_namespace" "alerts" {
-  name         = "observability-alerts"
-  workspace_id = var.amp_workspace_id
-
-  data = <<-YAML
-    groups:
-
-      # ============================================================
-      # 서비스 레지스트리 (Recording Rule)
-      # ============================================================
-      - name: service-registry
-        interval: 1m
-        rules:
-          - record: job:http_known_services:presence
-            expr: |
-              (
-                group by (job, deployment_environment)(
-                  last_over_time(http_server_request_duration_seconds_count[24h])
-                )
-              ) or (
-                group by (job, deployment_environment)(
-                  last_over_time(http_server_duration_milliseconds_count[24h])
-                )
-              )
-
-      # ============================================================
-      # HTTP 에러율 파생 메트릭
-      # ============================================================
-      - name: http-error-rates
-        interval: 1m
-        rules:
-          - record: job:http_4xx_error_ratio:rate5m
-            expr: |
-              (
-                sum by (job, deployment_environment, source)(
-                  rate(http_server_request_duration_seconds_count{http_response_status_code=~"4.."}[5m])
-                )
-                or
-                sum by (job, deployment_environment, source)(
-                  rate(http_server_request_duration_seconds_count[5m]) * 0
-                )
-              )
-              /
-              sum by (job, deployment_environment, source)(
-                rate(http_server_request_duration_seconds_count[5m])
-              )
-
-          - record: job:http_5xx_error_ratio:rate5m
-            expr: |
-              (
-                sum by (job, deployment_environment, source)(
-                  rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])
-                )
-                or
-                sum by (job, deployment_environment, source)(
-                  rate(http_server_request_duration_seconds_count[5m]) * 0
-                )
-              )
-              /
-              sum by (job, deployment_environment, source)(
-                rate(http_server_request_duration_seconds_count[5m])
-              )
-
-      # ============================================================
-      # 범용 알람
-      # ============================================================
-      - name: universal-alerts
-        interval: 1m
-        rules:
-
-          - alert: ServiceDown
-            expr: |
-              job:http_known_services:presence
-              unless
-              (
-                group by (job, deployment_environment)(
-                  rate(http_server_request_duration_seconds_count[5m])
-                )
-                or
-                group by (job, deployment_environment)(
-                  rate(http_server_duration_milliseconds_count[5m])
-                )
-              )
-            for: 5m
-            labels:
-              severity: critical
-            annotations:
-              summary: "서비스 메트릭 수신 중단 - {{ $labels.job }}"
-              description: "{{ $labels.job }} ({{ $labels.deployment_environment }}) 서비스의 HTTP 메트릭이 5분 이상 수신되지 않습니다. 서비스가 다운됐거나 OTel 수집이 중단됐을 수 있습니다"
-
-          - alert: Http4xxErrorRate
-            expr: job:http_4xx_error_ratio:rate5m > 0.05
-            for: 2m
-            labels:
-              severity: warning
-            annotations:
-              summary: "HTTP 4xx 에러율 5% 초과 - {{ $labels.job }}"
-              description: "{{ $labels.job }} ({{ $labels.deployment_environment }}) 서비스의 4xx 에러율이 {{ $value | humanizePercentage }} 입니다. 잘못된 요청 경로 또는 클라이언트 에러 가능성"
-
-          - alert: Unexpected4xxDetected
-            expr: |
-              job:http_4xx_error_ratio:rate5m > 0.01
-              and
-              avg_over_time(job:http_4xx_error_ratio:rate5m[30m] offset 5m) < 0.005
-            for: 2m
-            labels:
-              severity: warning
-            annotations:
-              summary: "비정상 4xx 급등 (평소 없던 에러) - {{ $labels.job }}"
-              description: "{{ $labels.job }} ({{ $labels.deployment_environment }}) 서비스에 평소 없던 4xx 에러 발생 중 (현재: {{ $value | humanizePercentage }}). 잘못된 경로 요청 또는 클라이언트 변경 가능성"
-
-          - alert: Http5xxErrorRate
-            expr: job:http_5xx_error_ratio:rate5m > 0.01
-            for: 2m
-            labels:
-              severity: critical
-            annotations:
-              summary: "HTTP 5xx 에러율 1% 초과 - {{ $labels.job }}"
-              description: "{{ $labels.job }} ({{ $labels.deployment_environment }}) 서비스의 5xx 에러율이 {{ $value | humanizePercentage }} 입니다. 서버 내부 오류 가능성"
-  YAML
-}
-
-resource "aws_prometheus_alert_manager_definition" "main" {
-  workspace_id = var.amp_workspace_id
-
-  definition = <<-YAML
-    alertmanager_config: |
-      global:
-        resolve_timeout: 5m
-
-      route:
-        group_by: ['alertname', 'job', 'deployment_environment']
-        group_wait: 30s
-        group_interval: 5m
-        repeat_interval: 4h
-        receiver: sns-alert
-
-        routes:
-          - match:
-              severity: critical
-            receiver: sns-alert
-            group_wait: 30s
-            group_interval: 5m
-            repeat_interval: 1h
-
-          - match:
-              severity: warning
-            receiver: sns-alert
-            group_wait: 1m
-            group_interval: 10m
-            repeat_interval: 12h
-
-      inhibit_rules:
-        - source_match:
-            severity: critical
-          target_match:
-            severity: warning
-          equal:
-            - job
-            - deployment_environment
-
-        - source_match:
-            alertname: Http4xxErrorRate
-          target_match:
-            alertname: Unexpected4xxDetected
-          equal:
-            - job
-            - deployment_environment
-
-      receivers:
-        - name: sns-alert
-          sns_configs:
-            - topic_arn: ${aws_sns_topic.alerts.arn}
-              sigv4:
-                region: ${var.aws_region}
-              attributes:
-                severity: '{{ .CommonLabels.severity }}'
-  YAML
-}

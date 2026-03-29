@@ -349,6 +349,61 @@ def _update_slack_message(message: dict):
 
 
 # ============================================================
+# Slack 슬래시 커맨드 처리 (/analyze <질문>)
+# ============================================================
+SLACK_SIGNING_SECRET = os.environ.get('SLACK_SIGNING_SECRET', '')
+
+def _verify_slack_signature(headers: dict, body_bytes: bytes) -> bool:
+    import hmac, hashlib, time
+    if not SLACK_SIGNING_SECRET:
+        return True  # secret 미설정 시 스킵 (개발용)
+    ts = headers.get('x-slack-request-timestamp') or headers.get('X-Slack-Request-Timestamp', '')
+    sig = headers.get('x-slack-signature') or headers.get('X-Slack-Signature', '')
+    if not ts or not sig:
+        return False
+    if abs(int(time.time()) - int(ts)) > 300:
+        return False
+    basestring = f"v0:{ts}:".encode() + body_bytes
+    digest = hmac.new(SLACK_SIGNING_SECRET.encode(), basestring, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(f"v0={digest}", sig)
+
+def _handle_slash_command(event: dict, body_bytes: bytes) -> dict:
+    headers = event.get('headers') or {}
+    if not _verify_slack_signature(headers, body_bytes):
+        return {'statusCode': 200, 'headers': {'Content-Type': 'text/plain'}, 'body': '❌ 서명 검증 실패'}
+
+    form = urllib.parse.parse_qs(body_bytes.decode('utf-8', errors='replace'))
+    query = (form.get('text', ['']) or [''])[0].strip()
+    user_name = (form.get('user_name', ['unknown']) or ['unknown'])[0]
+
+    if not query:
+        return {
+            'statusCode': 200,
+            'headers': {'Content-Type': 'text/plain; charset=utf-8'},
+            'body': '사용법: /analyze <질문>\n예) /analyze prod springboot 에러율 확인해줘'
+        }
+
+    print(f"[ENTRY] Slack /analyze: {query} (by @{user_name})")
+
+    # 비동기로 자신을 invoke → 3초 내 응답 가능
+    try:
+        lambda_client = boto3.client('lambda', region_name=os.environ.get('AWS_REGION_NAME', 'ap-northeast-2'))
+        lambda_client.invoke(
+            FunctionName=os.environ.get('AWS_LAMBDA_FUNCTION_NAME'),
+            InvocationType='Event',
+            Payload=json.dumps({
+                '_action': 'debug_query',
+                'query': query,
+                'environment': 'dev' if ('dev' in query.lower() and 'prod' not in query.lower()) else ('prod' if ('prod' in query.lower() and 'dev' not in query.lower()) else 'both'),
+            }).encode()
+        )
+    except Exception as e:
+        print(f"❌ /analyze 비동기 invoke 실패: {e}")
+
+    return {'statusCode': 200, 'body': ''}
+
+
+# ============================================================
 # Slack 버튼 클릭 처리
 # ============================================================
 def _handle_slack_interaction(event: dict) -> dict:
@@ -713,9 +768,96 @@ def lambda_handler(event, context):
         return _run_analysis_async(event)
 
     # ============================================================
-    # Slack 버튼 클릭 이벤트 처리 (Function URL)
+    # [DEBUG/TEST] 자유 질문 직접 분석 (툴 호출 품질 테스트용)
+    # 사용법: aws lambda invoke --payload '{"_action":"debug_query","query":"질문"}'
+    # ============================================================
+    if event.get('_action') == 'debug_query':
+        query = event.get('query', '')
+        environment = event.get('environment', 'prod')
+        print(f"🧪 [DEBUG] 자유 질문 분석 시작: {query}")
+
+        slack_token = os.environ.get('SLACK_BOT_TOKEN', '')
+        channel = os.environ.get('SLACK_CHANNEL', SLACK_CHANNEL)
+
+        # Slack에 시작 알림
+        def _post(text):
+            try:
+                data = json.dumps({'channel': channel, 'text': text}).encode()
+                req = urllib.request.Request(
+                    'https://slack.com/api/chat.postMessage', data=data,
+                    headers={'Authorization': f'Bearer {slack_token}', 'Content-Type': 'application/json'}
+                )
+                urllib.request.urlopen(req)
+            except Exception as e:
+                print(f"⚠️ Slack 전송 오류: {e}")
+
+        _post(f"🧪 *[DEBUG 분석 시작]*\n질문: {query}\n환경: {environment}")
+
+        try:
+            app = build_graph()
+            graph_state = app.invoke({
+                "question": f"[DEBUG] deployment_environment={environment} {query}",
+                "alert_name": "DebugQuery",
+                "severity": "low",
+                "amp_link": "",
+                "category": [],
+                "memory_stats": {},
+                "similar_incidents": [],
+                "final_answer": "",
+                "session_id": "",
+                "state_change_time": datetime.utcnow().isoformat(),
+                "slack_ts": "",
+                "slack_channel": channel,
+            })
+
+            final_answer = graph_state.get("final_answer", "{}")
+            try:
+                report = json.loads(final_answer)
+            except Exception:
+                report = {"summary": final_answer}
+
+            root_cause = report.get("root_cause", report.get("incident_summary", report.get("summary", "분석 결과 없음")))
+            evidence = report.get("evidence", {})
+            if isinstance(evidence, dict):
+                evidence_text = "\n".join(
+                    f"• *{k}*: {v}" for k, v in evidence.items()
+                    if v and v != "not queried"
+                ) or "없음"
+            elif isinstance(evidence, list):
+                evidence_text = "\n".join(f"• {e}" for e in evidence[:5]) or "없음"
+            else:
+                evidence_text = str(evidence) if evidence else "없음"
+
+            _post(
+                f"🧪 *[DEBUG 분석 완료]*\n"
+                f"*질문:* {query}\n"
+                f"*결론:* {root_cause}\n"
+                f"*근거:*\n{evidence_text}"
+            )
+            print(f"✅ [DEBUG] 분석 완료")
+        except Exception as e:
+            import traceback
+            _post(f"❌ [DEBUG 분석 실패] {e}")
+            traceback.print_exc()
+
+        return {'statusCode': 200, 'body': 'debug_query complete'}
+
+    # ============================================================
+    # Slack POST 이벤트 처리 (Function URL) — 슬래시 커맨드 or 버튼 클릭
     # ============================================================
     if 'requestContext' in event and event.get('requestContext', {}).get('http', {}).get('method') == 'POST':
+        body_raw = event.get('body', '') or ''
+        if event.get('isBase64Encoded'):
+            import base64
+            body_bytes = base64.b64decode(body_raw)
+        else:
+            body_bytes = body_raw.encode('utf-8')
+
+        # 슬래시 커맨드 감지 (payload= 없고 command= 있으면)
+        if b'command=%2Fanalyze' in body_bytes or b'command=/analyze' in body_bytes:
+            print("🔍 슬래시 커맨드 /analyze 감지")
+            return _handle_slash_command(event, body_bytes)
+
         print(f"🔘 Slack interaction 이벤트 감지")
         return _handle_slack_interaction(event)
 

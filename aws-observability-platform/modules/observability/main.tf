@@ -1,4 +1,28 @@
 # ============================================================
+# SNS Topic (AMP Alertmanager → Lambda)
+# ============================================================
+
+resource "aws_sns_topic" "alerts" {
+  name = "${var.project_name}-alerts"
+  tags = { Name = "${var.project_name}-alerts" }
+}
+
+resource "aws_sns_topic_policy" "alerts" {
+  arn = aws_sns_topic.alerts.arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "aps.amazonaws.com" }
+        Action    = "sns:Publish"
+        Resource  = aws_sns_topic.alerts.arn
+      }
+    ]
+  })
+}
+
+# ============================================================
 # Amazon Managed Prometheus (AMP)
 # ============================================================
 
@@ -11,6 +35,72 @@ resource "aws_prometheus_rule_group_namespace" "derived_metrics" {
   name         = "derived-metrics"
   workspace_id = aws_prometheus_workspace.main.id
   data         = file("${path.module}/prometheus-rules.yaml")
+}
+
+resource "aws_prometheus_rule_group_namespace" "alerts" {
+  name         = "observability-alerts"
+  workspace_id = aws_prometheus_workspace.main.id
+  data         = file("${path.module}/prometheus-alerts.yaml")
+}
+
+resource "aws_prometheus_alert_manager_definition" "main" {
+  workspace_id = aws_prometheus_workspace.main.id
+
+  definition = <<-YAML
+    alertmanager_config: |
+      global:
+        resolve_timeout: 5m
+
+      route:
+        group_by: ['alertname', 'job', 'deployment_environment']
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+        receiver: sns-alert
+
+        routes:
+          - match:
+              severity: critical
+            receiver: sns-alert
+            group_wait: 30s
+            group_interval: 5m
+            repeat_interval: 1h
+
+          - match:
+              severity: warning
+            receiver: sns-alert
+            group_wait: 1m
+            group_interval: 10m
+            repeat_interval: 12h
+
+      inhibit_rules:
+        - source_match:
+            severity: critical
+          target_match:
+            severity: warning
+          equal:
+            - job
+            - deployment_environment
+
+        - source_match:
+            alertname: Http4xxErrorRate
+          target_match:
+            alertname: Unexpected4xxDetected
+          equal:
+            - job
+            - deployment_environment
+
+      receivers:
+        - name: sns-alert
+          sns_configs:
+            - topic_arn: ${aws_sns_topic.alerts.arn}
+              sigv4:
+                region: ${var.aws_region}
+              attributes:
+                severity: '{{ .CommonLabels.severity }}'
+  YAML
+
+  depends_on = [aws_prometheus_rule_group_namespace.alerts]
 }
 
 # ============================================================

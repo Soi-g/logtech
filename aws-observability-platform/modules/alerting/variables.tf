@@ -33,8 +33,9 @@ variable "amp_endpoint" {
   type = string
 }
 
-variable "amp_workspace_id" {
-  type = string
+variable "sns_topic_arn" {
+  description = "SNS Topic ARN for Lambda subscription (from observability module)"
+  type        = string
 }
 
 # Storage
@@ -65,6 +66,12 @@ variable "slack_channel" {
   type = string
 }
 
+variable "slack_signing_secret" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
 variable "agentcore_memory_id" {
   type    = string
   default = ""
@@ -86,4 +93,12 @@ variable "bedrock_agent_alias_id" {
 
 variable "dynamodb_incident_table" {
   type = string
+}
+
+# LangSmith — Lambda에서 LangGraph 실행 시 노드별 입출력, 툴 호출, 소요 시간을 UI로 기록
+variable "langsmith_api_key" {
+  description = "LangSmith API 키 — LangGraph 실행 트레이싱용"
+  type        = string
+  sensitive   = true
+  default     = ""
 }

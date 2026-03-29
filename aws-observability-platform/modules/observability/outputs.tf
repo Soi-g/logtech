@@ -2,6 +2,10 @@ output "amp_workspace_id" {
   value = aws_prometheus_workspace.main.id
 }
 
+output "sns_topic_arn" {
+  value = aws_sns_topic.alerts.arn
+}
+
 output "amp_endpoint" {
   value = aws_prometheus_workspace.main.prometheus_endpoint
 }
