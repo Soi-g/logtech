@@ -1,9 +1,0 @@
-langgraph==1.0.10
-langchain-aws==1.3.1
-strands-agents==1.29.0
-opensearch-py==3.1.0
-requests-aws4auth==1.3.1
-slack-bolt==1.27.0
-boto3==1.42.60
-# LangSmith — LangGraph 실행 트레이싱 클라이언트 (LANGCHAIN_TRACING_V2=true 설정 시 자동 활성화)
-langsmith
