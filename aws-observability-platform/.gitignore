@@ -6,6 +6,7 @@
 *.tfvars.json
 *.tfplan
 
+
 # aws keys
 *accessKeys.csv
 
@@ -26,3 +27,8 @@ crash.log
 *_payload.json
 response.json
 policy.json
+
+# markdowns
+CICD.md
+SSM-MIGRATION.md
+VARIABLE-VALUE-SOURCE.md

@@ -16,14 +16,14 @@ variable "ec2_ami_id" {
   # ap-northeast-2 Ubuntu 22.04 LTS: ami-042e76978adeb8c48
 }
 
-variable "ec2_key_name" {
-  description = "EC2 Key Pair 이름 (SSH 접속용)"
-  type        = string
-}
-
 variable "environment" {
   description = "OTel resource attribute deployment.environment 값"
   type        = string
   default     = "prod"
+}
+
+variable "otel_gateway_endpoint" {
+  description = "플랫폼 게이트웨이 OTLP gRPC (NLB DNS:4317). 예: xxx.elb.ap-northeast-2.amazonaws.com:4317"
+  type        = string
 }
 

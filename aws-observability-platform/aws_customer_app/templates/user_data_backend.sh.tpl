@@ -4,7 +4,7 @@
 # OTel Collector Agent runs as systemd service (Datadog-style)
 #
 # Terraform templatefile variables:
-#   ${gateway_endpoint} — platform EC2 collector host:port (direct, port 14317)
+#   ${gateway_endpoint} — platform NLB host:4317 (gRPC → collector 14317)
 #   ${rds_endpoint}     — RDS Postgres hostname
 #   ${environment}      — deployment.environment label
 # ============================================================
@@ -120,8 +120,9 @@ exporters:
     timeout: 30s
     sending_queue:
       enabled: true
+      storage: file_storage
       num_consumers: 4
-      queue_size: 2048
+      queue_size: 10000
     retry_on_failure:
       enabled: true
       initial_interval: 5s

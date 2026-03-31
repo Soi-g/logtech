@@ -5,6 +5,7 @@
 
 terraform {
   required_version = ">= 1.0"
+  backend "s3" {}
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -112,11 +113,10 @@ module "compute" {
   project_name = var.project_name
   aws_region   = var.aws_region
 
-  ec2_ami_id   = var.ec2_ami_id
-  ec2_key_name = var.ec2_key_name
-  ec2_key_path = var.ec2_key_path
+  ec2_ami_id = var.ec2_ami_id
 
-  public_subnet_id     = module.networking.public_subnet_id
+  vpc_id               = module.networking.vpc_id
+  public_subnet_ids    = module.networking.public_subnet_ids
   otel_collector_sg_id = module.networking.otel_collector_sg_id
 
   amp_endpoint     = module.observability.amp_endpoint

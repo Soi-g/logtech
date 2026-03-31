@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars — 플랫폼 스택 apply 후 NLB DNS를 넣습니다.
+#   cd ../ && terraform output otel_gateway_nlb_dns
+#   형식: xxx.elb.ap-northeast-2.amazonaws.com:4317
+
+project_name            = "log-platform-dev"
+aws_region              = "ap-northeast-2"
+ec2_ami_id              = "ami-0c9c942bd7bf113a2"
+environment             = "prod"
+otel_gateway_endpoint   = "your-nlb-dns.elb.ap-northeast-2.amazonaws.com:4317"

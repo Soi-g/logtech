@@ -14,7 +14,16 @@ resource "aws_subnet" "public" {
   cidr_block              = "10.0.1.0/24"
   availability_zone       = "${var.aws_region}a"
   map_public_ip_on_launch = true
-  tags                    = { Name = "${var.project_name}-public-subnet" }
+  tags                    = { Name = "${var.project_name}-public-subnet-a" }
+}
+
+# NLB는 서로 다른 AZ에 서브넷이 최소 2개 필요
+resource "aws_subnet" "public_b" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.3.0/24"
+  availability_zone       = "${var.aws_region}b"
+  map_public_ip_on_launch = true
+  tags                    = { Name = "${var.project_name}-public-subnet-b" }
 }
 
 resource "aws_subnet" "private" {
@@ -55,6 +64,11 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+resource "aws_route_table_association" "public_b" {
+  subnet_id      = aws_subnet.public_b.id
+  route_table_id = aws_route_table.public.id
+}
+
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
   route {
@@ -79,14 +93,6 @@ resource "aws_security_group" "otel_collector" {
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
     description = "OTLP gRPC - from external OTel Collector (via Envoy JWT auth)"
     from_port   = 4317
     to_port     = 4317
@@ -106,6 +112,14 @@ resource "aws_security_group" "otel_collector" {
     description = "OTLP HTTP - from external OTel Collector"
     from_port   = 4318
     to_port     = 4318
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "OTLP HTTP direct to collector (NLB to 14318)"
+    from_port   = 14318
+    to_port     = 14318
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }

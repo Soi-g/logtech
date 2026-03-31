@@ -10,6 +10,11 @@ output "public_subnet_id" {
   value = aws_subnet.public.id
 }
 
+output "public_subnet_ids" {
+  description = "퍼블릭 서브넷 (NLB/ASG용, 서로 다른 AZ)"
+  value       = [aws_subnet.public.id, aws_subnet.public_b.id]
+}
+
 output "private_subnet_id" {
   value = aws_subnet.private.id
 }

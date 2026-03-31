@@ -1,16 +1,21 @@
+output "otel_gateway_nlb_dns" {
+  description = "게이트웨이 NLB DNS (internet-facing)"
+  value       = module.compute.otel_gateway_nlb_dns
+}
+
 output "otel_collector_public_ip" {
-  description = "우리 OTel Collector EC2 Public IP (LFS148 앱이 이 주소로 데이터를 전송)"
+  description = "Deprecated — 단일 EC2 EIP 제거. 에이전트는 otel_collector_otlp_grpc(NLB) 사용"
   value       = module.compute.otel_collector_public_ip
 }
 
 output "otel_collector_otlp_grpc" {
-  description = "OTLP gRPC 엔드포인트 (LFS148 앱 OTel Collector exporter에 설정)"
-  value       = "${module.compute.otel_collector_public_ip}:4317"
+  description = "OTLP gRPC 엔드포인트 (LFS148 앱 OTel Collector exporter — NLB :4317 → 인스턴스 :14317)"
+  value       = "${module.compute.otel_gateway_nlb_dns}:4317"
 }
 
 output "otel_collector_otlp_http" {
-  description = "OTLP HTTP 엔드포인트 (LFS148 앱 OTel Collector exporter에 설정)"
-  value       = "http://${module.compute.otel_collector_public_ip}:4318"
+  description = "OTLP HTTP 엔드포인트 (NLB :4318 → 인스턴스 :14318)"
+  value       = "http://${module.compute.otel_gateway_nlb_dns}:4318"
 }
 
 output "amp_workspace_id" {
@@ -68,9 +73,17 @@ output "bedrock_agent_role_arn" {
   value       = module.observability.bedrock_agent_role_arn
 }
 
-output "ssh_command" {
-  description = "EC2 SSH 접속 명령어"
-  value       = "ssh -i ${var.ec2_key_path} ubuntu@${module.compute.otel_collector_public_ip}"
+output "ssm_gateway_hint" {
+  description = "게이트웨이 ASG 인스턴스 접속 (Session Manager)"
+  value       = <<-EOT
+    aws ec2 describe-instances --filters "Name=tag:Name,Values=${var.project_name}-otel-gateway" "Name=instance-state-name,Values=running" --query 'Reservations[*].Instances[*].InstanceId' --output text --region ${var.aws_region}
+    aws ssm start-session --target <instance-id> --region ${var.aws_region}
+  EOT
+}
+
+output "otel_gateway_asg_name" {
+  description = "게이트웨이 Auto Scaling 그룹 이름"
+  value       = module.compute.otel_gateway_asg_name
 }
 
 output "athena_workgroup" {
@@ -119,7 +132,8 @@ output "next_steps" {
   ========================================
 
   [인증 구조]
-  고객 OTel → Envoy(4317/4318) → JWT 검증(Cognito) → OTelCol(14317/14318)
+  고객 OTel → NLB(:4317/:4318) → OTelCol(14317/14318)  |  Cognito 경로: Envoy(4317/4318) → OTelCol(14317/14318)
+  고객 에이전트 직접 전송: terraform output otel_collector_otlp_grpc
 
   [Step 1] 토큰 발급 (PowerShell)
   terraform output -raw cognito_client_secret
@@ -128,8 +142,9 @@ output "next_steps" {
   [Step 2] LFS148 otel-collector-config.yml 설정
   oauth2client extension에 client_id/secret/token_url 설정
 
-  [Step 3] Envoy 상태 확인
-  ssh ubuntu@${module.compute.otel_collector_public_ip}
+  [Step 3] 게이트웨이 인스턴스 접속 (Session Manager) 후 Envoy 확인
+  terraform output ssm_gateway_hint
+  aws ssm start-session --target <instance-id> --region ${var.aws_region}
   docker logs envoy -f
 
   [Step 4] OTel Collector 상태 확인

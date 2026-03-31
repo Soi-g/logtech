@@ -21,11 +21,13 @@ output "thymeleaf_url" {
   value = "http://${aws_instance.frontend.public_ip}:8090"
 }
 
-output "ssh_frontend" {
-  value = "ssh -i ${var.ec2_key_name}.pem ubuntu@${aws_instance.frontend.public_ip}"
+output "ssm_connect_frontend" {
+  description = "Session Manager (CLI)"
+  value       = "aws ssm start-session --target ${aws_instance.frontend.id} --region ${var.aws_region}"
 }
 
-output "ssh_backend" {
-  value = "ssh -i ${var.ec2_key_name}.pem ubuntu@${aws_instance.backend.public_ip}"
+output "ssm_connect_backend" {
+  description = "Session Manager (CLI)"
+  value       = "aws ssm start-session --target ${aws_instance.backend.id} --region ${var.aws_region}"
 }
 

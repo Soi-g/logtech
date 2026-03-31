@@ -13,18 +13,13 @@ variable "ec2_ami_id" {
   type        = string
 }
 
-variable "ec2_key_name" {
-  description = "EC2 Key Pair name for SSH access"
-  type        = string
+variable "public_subnet_ids" {
+  description = "Public subnet IDs for gateway ASG / NLB (at least 2 AZs)"
+  type        = list(string)
 }
 
-variable "ec2_key_path" {
-  description = "Local path to EC2 private key file"
-  type        = string
-}
-
-variable "public_subnet_id" {
-  description = "Public subnet ID for EC2 placement"
+variable "vpc_id" {
+  description = "VPC ID for NLB target groups"
   type        = string
 }
 

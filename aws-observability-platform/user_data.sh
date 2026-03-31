@@ -15,11 +15,14 @@ mv otelcol-contrib /usr/local/bin/
 rm otelcol-contrib_0.147.0_linux_amd64.tar.gz
 
 useradd --system --no-create-home --shell /usr/sbin/nologin otelcol || true
-mkdir -p /etc/otelcol
-chown -R otelcol:otelcol /etc/otelcol
+mkdir -p /etc/otelcol /var/lib/otelcol/file_storage
+chown -R otelcol:otelcol /etc/otelcol /var/lib/otelcol
 
 cat > /etc/otelcol/config.yaml <<EOF
 extensions:
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
+    create_directory: true
   sigv4auth/aps:
     region: ${aws_region}
     service: aps
@@ -147,6 +150,11 @@ exporters:
     timeout: 30s
     remote_write_queue:
       enabled: true
+      queue_size: 10000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
     resource_to_telemetry_conversion:
       enabled: true
 
@@ -159,8 +167,13 @@ exporters:
     timeout: 30s
     sending_queue:
       enabled: true
+      storage: file_storage
       num_consumers: 4
-      queue_size: 2048
+      queue_size: 10000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
 
   opensearch/logs_host:
     http:
@@ -171,8 +184,13 @@ exporters:
     timeout: 30s
     sending_queue:
       enabled: true
+      storage: file_storage
       num_consumers: 4
-      queue_size: 2048
+      queue_size: 10000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
 
   opensearch/traces:
     http:
@@ -183,8 +201,13 @@ exporters:
     timeout: 30s
     sending_queue:
       enabled: true
+      storage: file_storage
       num_consumers: 4
-      queue_size: 2048
+      queue_size: 10000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
 
   # ── Dev 환경 S3 exporters ──────────────────────────────────────
   awss3/logs_dev_app:
@@ -297,7 +320,7 @@ exporters:
     marshaler: otlp_json
 
 service:
-  extensions: [sigv4auth/aps, sigv4auth/es]
+  extensions: [file_storage, sigv4auth/aps, sigv4auth/es]
 
   pipelines:
     # ── Ingest (모든 환경 데이터 수신 후 라우팅) ──────────────────

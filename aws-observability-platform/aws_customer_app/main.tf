@@ -2,7 +2,7 @@
 # Customer App Stack
 #
 # 별도 VPC에 AWS 고객 앱을 시뮬레이션하는 스택.
-# OTel Collector Agent가 플랫폼 게이트웨이(var.otel_gateway_endpoint)로 데이터를 전송.
+# OTel Collector Agent가 플랫폼 NLB(var.otel_gateway_endpoint, :4317)로 데이터를 전송.
 #
 # EC2 #1 (frontend): Flask(5001) + Thymeleaf(8090) + loadgenerator + OTel Collector
 # EC2 #2 (backend):  Spring Boot(8080) + OTel Collector
@@ -18,6 +18,7 @@
 # ============================================================
 
 terraform {
+  backend "s3" {}
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -28,6 +29,32 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
+}
+
+# Session Manager 접속용 (키 페어 없음)
+resource "aws_iam_role" "customer_ec2" {
+  name = "${var.project_name}-customer-ec2-ssm"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+
+  tags = { Name = "${var.project_name}-customer-ec2-ssm-role" }
+}
+
+resource "aws_iam_role_policy_attachment" "customer_ec2_ssm" {
+  role       = aws_iam_role.customer_ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "customer_ec2" {
+  name = "${var.project_name}-customer-ec2-ssm"
+  role = aws_iam_role.customer_ec2.name
 }
 
 # ─── VPC ────────────────────────────────────────────────────────────────────
@@ -82,13 +109,6 @@ resource "aws_security_group" "frontend" {
   vpc_id      = aws_vpc.customer.id
 
   ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
     description = "Thymeleaf UI"
     from_port   = 8090
     to_port     = 8090
@@ -119,13 +139,6 @@ resource "aws_security_group" "backend" {
   description = "Customer backend EC2 - Spring Boot"
   vpc_id      = aws_vpc.customer.id
 
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
   ingress {
     description     = "Spring Boot from frontend SG only"
     from_port       = 8080
@@ -198,22 +211,6 @@ resource "aws_db_instance" "postgres" {
   tags = { Name = "${var.project_name}-customer-postgres" }
 }
 
-# ─── Platform OTel Collector EC2 IP 자동 조회 ────────────────────────────────
-data "aws_instance" "otel_collector" {
-  filter {
-    name   = "tag:Name"
-    values = ["${var.project_name}-otel-collector"]
-  }
-  filter {
-    name   = "instance-state-name"
-    values = ["running"]
-  }
-}
-
-locals {
-  gateway_endpoint = "${data.aws_instance.otel_collector.public_ip}:14317"
-}
-
 # ─── EC2 #2 — Backend (Spring Boot) ──────────────────────────────────────────
 # Frontend user_data에서 backend private IP를 사용하므로 먼저 생성
 
@@ -222,7 +219,7 @@ resource "aws_instance" "backend" {
   instance_type          = "t3.micro"
   subnet_id              = aws_subnet.app.id
   vpc_security_group_ids = [aws_security_group.backend.id]
-  key_name               = var.ec2_key_name
+  iam_instance_profile   = aws_iam_instance_profile.customer_ec2.name
 
   root_block_device {
     volume_size = 10
@@ -230,7 +227,7 @@ resource "aws_instance" "backend" {
   }
 
   user_data = templatefile("${path.module}/templates/user_data_backend.sh.tpl", {
-    gateway_endpoint = local.gateway_endpoint
+    gateway_endpoint = var.otel_gateway_endpoint
     rds_endpoint     = aws_db_instance.postgres.address
     environment      = var.environment
     instance_name    = "${var.project_name}-customer-backend"
@@ -248,7 +245,7 @@ resource "aws_instance" "frontend" {
   instance_type          = "t3.micro"
   subnet_id              = aws_subnet.app.id
   vpc_security_group_ids = [aws_security_group.frontend.id]
-  key_name               = var.ec2_key_name
+  iam_instance_profile   = aws_iam_instance_profile.customer_ec2.name
 
   root_block_device {
     volume_size = 10
@@ -256,7 +253,7 @@ resource "aws_instance" "frontend" {
   }
 
   user_data = templatefile("${path.module}/templates/user_data_frontend.sh.tpl", {
-    gateway_endpoint   = local.gateway_endpoint
+    gateway_endpoint   = var.otel_gateway_endpoint
     backend_private_ip = aws_instance.backend.private_ip
     environment        = var.environment
     instance_name      = "${var.project_name}-customer-frontend"
