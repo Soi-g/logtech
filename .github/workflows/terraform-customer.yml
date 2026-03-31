@@ -1,0 +1,58 @@
+name: Terraform Customer
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - 'aws_customer_app/**'
+      - '.github/workflows/terraform-customer.yml'
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths:
+      - 'aws_customer_app/**'
+      - '.github/workflows/terraform-customer.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform Customer
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: aws_customer_app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::822710269690:role/gitactions
+          aws-region: ap-northeast-2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init -backend-config=backend.hcl
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve tfplan
