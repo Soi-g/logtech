@@ -31,6 +31,20 @@ provider "aws" {
   region = var.aws_region
 }
 
+data "terraform_remote_state" "platform" {
+  backend = "s3"
+  config = {
+    bucket = "logtech-tfstate-apne2"
+    key    = "observability-platform/terraform.tfstate"
+    region = var.aws_region
+  }
+}
+
+locals {
+  # Allow manual override, otherwise read endpoint from platform state output.
+  otel_gateway_endpoint = var.otel_gateway_endpoint != "" ? var.otel_gateway_endpoint : data.terraform_remote_state.platform.outputs.otel_collector_otlp_grpc
+}
+
 # Session Manager 접속용 (키 페어 없음)
 resource "aws_iam_role" "customer_ec2" {
   name = "${var.project_name}-customer-ec2-ssm"
@@ -227,7 +241,7 @@ resource "aws_instance" "backend" {
   }
 
   user_data = templatefile("${path.module}/templates/user_data_backend.sh.tpl", {
-    gateway_endpoint = var.otel_gateway_endpoint
+    gateway_endpoint = local.otel_gateway_endpoint
     rds_endpoint     = aws_db_instance.postgres.address
     environment      = var.environment
     instance_name    = "${var.project_name}-customer-backend"
@@ -253,7 +267,7 @@ resource "aws_instance" "frontend" {
   }
 
   user_data = templatefile("${path.module}/templates/user_data_frontend.sh.tpl", {
-    gateway_endpoint   = var.otel_gateway_endpoint
+    gateway_endpoint   = local.otel_gateway_endpoint
     backend_private_ip = aws_instance.backend.private_ip
     environment        = var.environment
     instance_name      = "${var.project_name}-customer-frontend"

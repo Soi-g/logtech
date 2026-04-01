@@ -5,14 +5,10 @@ on:
     branches:
       - main
       - dev
-    paths-ignore:
-      - 'aws_customer_app/**'
   pull_request:
     branches:
       - main
       - dev
-    paths-ignore:
-      - 'aws_customer_app/**'
   workflow_dispatch:
 
 permissions:
@@ -20,9 +16,14 @@ permissions:
   contents: read
 
 jobs:
-  terraform:
+  platform:
     name: Terraform Platform
     runs-on: ubuntu-latest
+    env:
+      TF_VAR_opensearch_master_password: ${{ secrets.TF_VAR_OPENSEARCH_MASTER_PASSWORD }}
+      TF_VAR_slack_bot_token: ${{ secrets.TF_VAR_SLACK_BOT_TOKEN }}
+      TF_VAR_slack_signing_secret: ${{ secrets.TF_VAR_SLACK_SIGNING_SECRET }}
+      TF_VAR_langsmith_api_key: ${{ secrets.TF_VAR_LANGSMITH_API_KEY }}
 
     defaults:
       run:
@@ -49,8 +50,44 @@ jobs:
         run: terraform validate
 
       - name: Terraform Plan
-        run: terraform plan -out=tfplan
+        run: terraform plan -input=false -out=tfplan
 
       - name: Terraform Apply
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -input=false -auto-approve tfplan
+
+  customer:
+    name: Terraform Customer
+    runs-on: ubuntu-latest
+    needs: platform
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: aws_customer_app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::822710269690:role/gitactions
+          aws-region: ap-northeast-2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init -backend-config=backend.hcl
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform Apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform apply -input=false -auto-approve tfplan

@@ -14,6 +14,7 @@ variable "ec2_ami_id" {
   description = "EC2 AMI ID (Ubuntu 22.04)"
   type        = string
   # ap-northeast-2 Ubuntu 22.04 LTS: ami-042e76978adeb8c48
+  default     = "ami-042e76978adeb8c48"
 }
 
 variable "environment" {
@@ -23,7 +24,8 @@ variable "environment" {
 }
 
 variable "otel_gateway_endpoint" {
-  description = "플랫폼 게이트웨이 OTLP gRPC (NLB DNS:4317). 예: xxx.elb.ap-northeast-2.amazonaws.com:4317"
+  description = "선택값: 플랫폼 게이트웨이 OTLP gRPC endpoint 직접 지정. 비어 있으면 platform remote state output 사용"
   type        = string
+  default     = ""
 }
 
