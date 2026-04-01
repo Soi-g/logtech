@@ -557,7 +557,7 @@ resource "aws_cognito_user_pool" "otel_auth" {
 }
 
 resource "aws_cognito_user_pool_domain" "otel_auth" {
-  domain       = "${var.project_name}-otel-auth"
+  domain       = "${var.project_name}-${var.account_id}-otel-auth"
   user_pool_id = aws_cognito_user_pool.otel_auth.id
 }
 
