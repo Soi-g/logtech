@@ -24,6 +24,7 @@ jobs:
       TF_VAR_slack_bot_token: ${{ secrets.TF_VAR_SLACK_BOT_TOKEN }}
       TF_VAR_slack_signing_secret: ${{ secrets.TF_VAR_SLACK_SIGNING_SECRET }}
       TF_VAR_langsmith_api_key: ${{ secrets.TF_VAR_LANGSMITH_API_KEY }}
+      TF_VAR_slack_channel: ${{ secrets.TF_VAR_SLACK_CHANNEL }}
 
     defaults:
       run:
